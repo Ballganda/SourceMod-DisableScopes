@@ -7,8 +7,8 @@
 #define NAME "[CS:S]sm_disablescopes"
 #define AUTHOR "BallGanda"
 #define DESCRIPTION "sm_disablescopes of selected weapons & limit air or ground use"
-#define PLUGIN_VERSION "0.0.b6"
-#define URL "https://github.com/Ballganda/SourceMod-sm_disablescopes"
+#define PLUGIN_VERSION "0.0.b7"
+#define URL "https://github.com/Ballganda/SourceMod-DisableScopes"
 #define DS_PREFIX "[DisableScopes]"
 
 public Plugin myinfo = {
@@ -125,7 +125,8 @@ void LoadInstanceConfig(const char[] cfgName)
     {
         TrimString(line);
 
-        if (line[0] == ' ' || line[0] == '/')
+        // Skip empty lines and comments
+        if (line[0] == '\0' || line[0] == '/' || line[0] == ';')
             continue;
 
         int pos = BreakString(line, cvar, sizeof(cvar));
@@ -172,6 +173,30 @@ bool IsNoScopeWeapon(int entityNumber)
     return false;
 }
 
+void ForceUnscope(int client, int activeWeapon)
+{
+    // Kill predicted scope window (high-ping fix)
+    SetEntPropFloat(activeWeapon, Prop_Send, "m_flNextSecondaryAttack", GetGameTime() + 0.2);
+
+    // m_iFOV == 0 means "use default FOV" (not scoped)
+    int fov = GetEntProp(client, Prop_Send, "m_iFOV");
+    if (fov != 0)
+    {
+        SetEntProp(client, Prop_Send, "m_iFOV", 0);
+    }
+
+    // Clear weapon/player zoom state when those props exist
+    if (HasEntProp(activeWeapon, Prop_Send, "m_zoomLevel"))
+    {
+        SetEntProp(activeWeapon, Prop_Send, "m_zoomLevel", 0);
+    }
+
+    if (HasEntProp(client, Prop_Send, "m_bResumeZoom"))
+    {
+        SetEntProp(client, Prop_Send, "m_bResumeZoom", 0);
+    }
+}
+
 public Action OnPlayerRunCmd(
     int client,
     int &buttons,
@@ -186,7 +211,7 @@ public Action OnPlayerRunCmd(
     int mouse[2]
 )
 {
-    if (!g_cvEnablePlugin.BoolValue || !IsClientInGame(client))
+    if (!g_cvEnablePlugin.BoolValue || !IsClientInGame(client) || !IsPlayerAlive(client))
         return Plugin_Continue;
 
     int activeWeapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
@@ -212,17 +237,7 @@ public Action OnPlayerRunCmd(
 
     // Strip secondary attack so player cannot re-scope
     buttons &= ~IN_ATTACK2;
-
-    // Kill predicted scope window (high-ping fix)
-    SetEntPropFloat(activeWeapon, Prop_Send, "m_flNextSecondaryAttack", GetGameTime() + 0.2);
-
-    // Force unzoom if already scoped
-    int fov;
-    GetEntProp(client, Prop_Send, "m_iFOV", fov);
-    if (fov < 90)
-    {
-        SetEntProp(client, Prop_Send, "m_iFOV", 90);
-    }
+    ForceUnscope(client, activeWeapon);
 
     return Plugin_Continue;
 }
