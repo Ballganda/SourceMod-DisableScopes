@@ -7,7 +7,7 @@
 #define NAME "[CS:S]sm_disablescopes"
 #define AUTHOR "BallGanda"
 #define DESCRIPTION "sm_disablescopes of selected weapons & limit air or ground use"
-#define PLUGIN_VERSION "0.0.b7"
+#define PLUGIN_VERSION "0.0.b8"
 #define URL "https://github.com/Ballganda/SourceMod-DisableScopes"
 #define DS_PREFIX "[DisableScopes]"
 
@@ -27,6 +27,13 @@ ConVar g_cvDisableScopeWeakSnipers = null;
 ConVar g_cvDisableInAir = null;
 ConVar g_cvDisableOnGround = null;
 
+int g_iCachedWeapon[MAXPLAYERS + 1];
+bool g_bCachedIsNoScope[MAXPLAYERS + 1];
+
+bool g_bEntPropsCached = false;
+bool g_bHasZoomLevel = false;
+bool g_bHasResumeZoom = false;
+
 public void OnPluginStart()
 {
     CheckGameVersion();
@@ -42,6 +49,17 @@ public void OnPluginStart()
     g_cvDisableScopeWeakSnipers = CreateConVar("sm_disablescopes_weaksnipers", "1", "Disable the weak snipers scope <1|0>");
     g_cvDisableInAir = CreateConVar("sm_disablescopes_inair", "1", "Disable Scope when the player is jumping/off ground <1|0>");
     g_cvDisableOnGround = CreateConVar("sm_disablescopes_onground", "0", "Disable Scope when the player is on ground <1|0>");
+
+    g_cvDisableScopeAwp.AddChangeHook(OnWeaponFilterCvarChanged);
+    g_cvDisableScopeScout.AddChangeHook(OnWeaponFilterCvarChanged);
+    g_cvDisableScopeAutoSnipers.AddChangeHook(OnWeaponFilterCvarChanged);
+    g_cvDisableScopeWeakSnipers.AddChangeHook(OnWeaponFilterCvarChanged);
+
+    for (int i = 0; i <= MaxClients; i++)
+    {
+        g_iCachedWeapon[i] = -1;
+        g_bCachedIsNoScope[i] = false;
+    }
 
     static const char g_DefaultDisableScopesCfg[][] =
     {
@@ -65,6 +83,26 @@ public void OnPluginStart()
 public void OnConfigsExecuted()
 {
     LoadInstanceConfig("sm_disablescopes");
+}
+
+public void OnClientDisconnect(int client)
+{
+    g_iCachedWeapon[client] = -1;
+    g_bCachedIsNoScope[client] = false;
+}
+
+public void OnWeaponFilterCvarChanged(ConVar convar, const char[] oldValue, const char[] newValue)
+{
+    InvalidateWeaponCache();
+}
+
+void InvalidateWeaponCache()
+{
+    for (int i = 0; i <= MaxClients; i++)
+    {
+        g_iCachedWeapon[i] = -1;
+        g_bCachedIsNoScope[i] = false;
+    }
 }
 
 void GeneratePerInstanceConfig(const char[] cfgName, const char[][] defaultLines, int lineCount)
@@ -148,6 +186,9 @@ void LoadInstanceConfig(const char[] cfgName)
 
     delete f;
 
+    // Weapon filter cvars may have changed from config
+    InvalidateWeaponCache();
+
     PrintToServer("%sInstance config loaded", DS_PREFIX);
 }
 
@@ -173,25 +214,61 @@ bool IsNoScopeWeapon(int entityNumber)
     return false;
 }
 
-void ForceUnscope(int client, int activeWeapon)
+bool IsCachedNoScopeWeapon(int client, int activeWeapon)
 {
-    // Kill predicted scope window (high-ping fix)
+    if (activeWeapon != g_iCachedWeapon[client])
+    {
+        g_iCachedWeapon[client] = activeWeapon;
+        g_bCachedIsNoScope[client] = IsNoScopeWeapon(activeWeapon);
+    }
+
+    return g_bCachedIsNoScope[client];
+}
+
+bool ShouldBlockScope(int client)
+{
+    bool onGround = (GetEntityFlags(client) & FL_ONGROUND) != 0;
+
+    if (onGround)
+        return g_cvDisableOnGround.BoolValue;
+
+    return g_cvDisableInAir.BoolValue;
+}
+
+void CacheEntPropAvailability(int client, int activeWeapon)
+{
+    if (g_bEntPropsCached)
+        return;
+
+    g_bHasZoomLevel = HasEntProp(activeWeapon, Prop_Send, "m_zoomLevel");
+    g_bHasResumeZoom = HasEntProp(client, Prop_Send, "m_bResumeZoom");
+    g_bEntPropsCached = true;
+}
+
+void ForceUnscope(int client, int activeWeapon, bool pressedAttack2)
+{
+    // Kill predicted scope window (high-ping fix) — every blocked tick
     SetEntPropFloat(activeWeapon, Prop_Send, "m_flNextSecondaryAttack", GetGameTime() + 0.2);
 
-    // m_iFOV == 0 means "use default FOV" (not scoped)
+    // Skip FOV/zoom writes when idle and not scoped
     int fov = GetEntProp(client, Prop_Send, "m_iFOV");
+    if (!pressedAttack2 && fov == 0)
+        return;
+
+    CacheEntPropAvailability(client, activeWeapon);
+
+    // m_iFOV == 0 means "use default FOV" (not scoped)
     if (fov != 0)
     {
         SetEntProp(client, Prop_Send, "m_iFOV", 0);
     }
 
-    // Clear weapon/player zoom state when those props exist
-    if (HasEntProp(activeWeapon, Prop_Send, "m_zoomLevel"))
+    if (g_bHasZoomLevel)
     {
         SetEntProp(activeWeapon, Prop_Send, "m_zoomLevel", 0);
     }
 
-    if (HasEntProp(client, Prop_Send, "m_bResumeZoom"))
+    if (g_bHasResumeZoom)
     {
         SetEntProp(client, Prop_Send, "m_bResumeZoom", 0);
     }
@@ -214,30 +291,22 @@ public Action OnPlayerRunCmd(
     if (!g_cvEnablePlugin.BoolValue || !IsClientInGame(client) || !IsPlayerAlive(client))
         return Plugin_Continue;
 
+    // Cheap air/ground check before weapon classname work
+    if (!ShouldBlockScope(client))
+        return Plugin_Continue;
+
     int activeWeapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
     if (!IsValidEntity(activeWeapon))
         return Plugin_Continue;
 
-    if (!IsNoScopeWeapon(activeWeapon))
+    if (!IsCachedNoScopeWeapon(client, activeWeapon))
         return Plugin_Continue;
 
-    int flags = GetEntityFlags(client);
-    bool onGround = (flags & FL_ONGROUND) != 0;
-
-    bool blockScope = false;
-
-    // Determine whether scoping should be blocked
-    if (onGround && g_cvDisableOnGround.BoolValue)
-        blockScope = true;
-    else if (!onGround && g_cvDisableInAir.BoolValue)
-        blockScope = true;
-
-    if (!blockScope)
-        return Plugin_Continue;
+    bool pressedAttack2 = (buttons & IN_ATTACK2) != 0;
 
     // Strip secondary attack so player cannot re-scope
     buttons &= ~IN_ATTACK2;
-    ForceUnscope(client, activeWeapon);
+    ForceUnscope(client, activeWeapon, pressedAttack2);
 
     return Plugin_Continue;
 }
