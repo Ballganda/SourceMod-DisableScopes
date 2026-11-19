@@ -69,12 +69,16 @@ public static class ScopeProbe
     // composition, about 31 ms over Remote Desktop, so one read per sample).
     static Bitmap _strip;
     static Graphics _g;
+    // Ammo HUD (clip counter, bottom right at 1024x768: x 790..860, y 700..750): its yellow-orange digits
+    // are hashed on every sample, so a change of the clip number (a shot the client shows) is detectable.
+    public static ulong AmmoHash;
+    public static int AmmoLit;
     public static int Classify(IntPtr hwnd, out string detail)
     {
         RECT r; GetClientRect(hwnd, out r);
         POINT o = new POINT(); ClientToScreen(hwnd, ref o);
         int w = r.R - r.L, h = r.B - r.T;
-        int y0 = (int)(h * 0.40), y1 = (int)(h * 0.60);
+        int y0 = (int)(h * 0.40), y1 = h - 1;
         if (_strip == null || _strip.Width != w || _strip.Height != y1 - y0 + 1)
         {
             if (_g != null) _g.Dispose();
@@ -84,9 +88,10 @@ public static class ScopeProbe
         }
         _g.CopyFromScreen(o.X, o.Y + y0, 0, 0, _strip.Size);
         int[] xs = { (int)(w * 0.04), (int)(w * 0.96) };
-        int[] ys = { 0, y1 - y0 };
+        int[] ys = { 0, (int)(h * 0.60) - y0 };
         bool dark = true;
         detail = "";
+        AmmoRegion(w, h, y0);
         foreach (int y in ys)
             foreach (int x in xs)
             {
@@ -96,6 +101,32 @@ public static class ScopeProbe
             }
         return dark ? 1 : 0;
     }
+    static void AmmoRegion(int w, int h, int y0)
+    {
+        double sx = w / 1024.0, sy = h / 768.0;
+        int ax0 = (int)(790 * sx), ax1 = Math.Min((int)(860 * sx), w - 1), ay0 = (int)(700 * sy) - y0, ay1 = Math.Min((int)(750 * sy) - y0, _strip.Height - 1);
+        if (ay0 < 0 || ax1 <= ax0 || ay1 <= ay0) { AmmoHash = 0; AmmoLit = 0; return; }
+        var data = _strip.LockBits(new Rectangle(ax0, ay0, ax1 - ax0 + 1, ay1 - ay0 + 1), System.Drawing.Imaging.ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        ulong hash = 1469598103934665603UL; int lit = 0;
+        try
+        {
+            byte[] row = new byte[data.Stride];
+            for (int y = 0; y < data.Height; y++)
+            {
+                Marshal.Copy(new IntPtr(data.Scan0.ToInt64() + (long)y * data.Stride), row, 0, data.Stride);
+                for (int x = 0; x < data.Width; x++)
+                {
+                    int b = row[x * 4], r = row[x * 4 + 2];
+                    bool on = r > 110 && r > 2 * b + 40;
+                    if (on) lit++;
+                    hash = (hash ^ (on ? 1UL : 0UL)) * 1099511628211UL;
+                }
+            }
+        }
+        finally { _strip.UnlockBits(data); }
+        AmmoHash = hash; AmmoLit = lit;
+    }
+
     public static void Start(IntPtr hwnd)
     {
         lock (Rows) { Rows.Clear(); }
@@ -105,6 +136,7 @@ public static class ScopeProbe
         {
             int last = -1;
             double nextProbe = 0;
+            ulong shown = 0, pending = 0; int pendingN = 0; bool haveShown = false;
             while (_run)
             {
                 string d;
@@ -115,6 +147,18 @@ public static class ScopeProbe
                 {
                     lock (Rows) { Rows.Add(string.Format(System.Globalization.CultureInfo.InvariantCulture, "{0:F2},state,{1},{2}", t, s, d.Trim())); }
                     last = s;
+                }
+                ulong ah = AmmoHash;
+                if (!haveShown) { shown = ah; haveShown = true; }
+                else if (ah == shown) { pendingN = 0; }
+                else
+                {
+                    if (ah == pending) pendingN++; else { pending = ah; pendingN = 1; }
+                    if (pendingN >= 2)          // stable for two samples: the clip counter changed
+                    {
+                        shown = ah; pendingN = 0;
+                        lock (Rows) { Rows.Add(string.Format(System.Globalization.CultureInfo.InvariantCulture, "{0:F2},ammo,{1},{2}", t, ah, AmmoLit)); }
+                    }
                 }
                 if (t >= nextProbe)               // edge colours every 500 ms, for diagnosis
                 {

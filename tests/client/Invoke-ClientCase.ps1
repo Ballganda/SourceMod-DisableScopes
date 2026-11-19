@@ -23,6 +23,7 @@ param(
     [Parameter(Mandatory)][string]$OutDir,
     [switch]$SelfCheck,
     [int]$Reps = 3,
+    [int]$Port = 27015,
     [string]$Map = 'de_dust2'
 )
 $ErrorActionPreference = 'Stop'
@@ -201,14 +202,14 @@ bind F10 "stop"
 Remove-Item (Join-Path $clientGame "$demo.dem") -ErrorAction SilentlyContinue
 Remove-Item $serverCsv -ErrorAction SilentlyContinue
 
-    $srcdsArgs = "-console -game cstrike -condebug -tickrate 100 +sv_lan 1 +maxplayers 10 +bot_quota 0 " +
+    $srcdsArgs = "-console -game cstrike -condebug -tickrate 100 -port $Port +sv_lan 1 +maxplayers 10 +bot_quota 0 " +
                  "+disablescopes_client_selfcheck $([int][bool]$SelfCheck) +map $Map"
     Write-Host 'Starting srcds for the client case...'
     $srv = Start-Process (Join-Path $ServerDir 'srcds.exe') -ArgumentList $srcdsArgs -WorkingDirectory $ServerDir -WindowStyle Minimized -PassThru
     Start-Sleep 20
     $ip = (Get-NetIPConfiguration | Where-Object IPv4DefaultGateway)[0].IPv4Address.IPAddress
     Write-Host "Launching the client (connect ${ip}:27015)..."
-    Start-Process $steam -ArgumentList "-applaunch 240 -novid -windowed -w 1024 -h 768 +exec dsc_case.cfg +connect ${ip}:27015"
+    Start-Process $steam -ArgumentList "-applaunch 240 -novid -windowed -w 1024 -h 768 +exec dsc_case.cfg +connect ${ip}:$Port"
     $deadline = (Get-Date).AddSeconds(240)
     $ready = $false
     while (-not $ready -and (Get-Date) -lt $deadline) {

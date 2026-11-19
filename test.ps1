@@ -5,6 +5,10 @@
 #   .\test.ps1 -InjectError    self-check: the suite logs a deliberate error, so this run MUST fail
 #   .\test.ps1 -Client         also run the client-view case with the real CS:S client (about 2 min;
 #                              leave the desktop alone). A client case that cannot run is a failure.
+#   .\test.ps1 -Matrix         also run the visual matrix: every on-screen case at simulated 0, 50, 150 and
+#                              250 ms with the real client (about 10 min; leave the desktop alone).
+#                              -MatrixRef <git ref> measures another build (e.g. v0.0.b6-beta) instead of the
+#                              working tree; -ClientSelfCheck makes the matrix run with the plugin disabled.
 #   .\test.ps1 -Client -ClientSelfCheck
 #                              self-check: the plugin is disabled for the client case, so the case
 #                              and this run MUST fail (proves the screen channel sees a scope)
@@ -13,6 +17,8 @@ param(
     [switch]$InjectError,
     [switch]$Client,
     [switch]$ClientSelfCheck,
+    [switch]$Matrix,
+    [string]$MatrixRef = '',
     [string]$ClientDir = $(if ($env:CSS_CLIENT_DIR) { $env:CSS_CLIENT_DIR } else { 'C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Source' }),
     [string]$ServerDir = $(if ($env:CSS_SERVER_DIR) { $env:CSS_SERVER_DIR } else { 'C:\Users\user\cssds' }),
     [string]$Map = 'de_dust2',
@@ -72,8 +78,8 @@ if (Get-Process srcds -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq
     Write-Error "srcds.exe is already running from $ServerDir; stop it first (the suite needs its own server instance)."
     exit 2
 }
-if ($ClientSelfCheck -and -not $Client) { Write-Error '-ClientSelfCheck needs -Client'; exit 2 }
-if ($Client -and (Get-Process cstrike_win64, cstrike, hl2 -ErrorAction SilentlyContinue)) {
+if ($ClientSelfCheck -and -not ($Client -or $Matrix)) { Write-Error '-ClientSelfCheck needs -Client or -Matrix'; exit 2 }
+if (($Client -or $Matrix) -and (Get-Process cstrike_win64, cstrike, hl2 -ErrorAction SilentlyContinue)) {
     Write-Error 'a CS:S client is already running; close it first (the client case drives its own client).'
     exit 2
 }
@@ -110,13 +116,24 @@ foreach ($l in $failed) { $problems.Add('test: ' + (Remove-LogPrefix $l 'FAIL'))
 $clientLine = $null
 if ($Client) {
     $clientOut = Join-Path $PSScriptRoot ('tests\client\out\' + (Get-Date -Format 'yyyyMMdd_HHmmss'))
-    $cc = & (Join-Path $PSScriptRoot 'tests\client\Invoke-ClientCase.ps1') -ServerDir $ServerDir -ClientDir $ClientDir -OutDir $clientOut -SelfCheck:$ClientSelfCheck
+    $cc = & (Join-Path $PSScriptRoot 'tests\client\Invoke-ClientCase.ps1') -ServerDir $ServerDir -ClientDir $ClientDir -OutDir $clientOut -SelfCheck:$ClientSelfCheck -Port $Port
     $clientLine = "[$($cc.Status)] $($cc.Name) - $($cc.Detail)"
     if ($cc.Status -ne 'PASS') { $problems.Add('test: ' + $clientLine) }
     foreach ($p in $cc.Problems) { $problems.Add("client case: $p") }
     Write-Host "client-case artefacts: $clientOut"
 }
-else { $clientLine = '[SKIP] client view cases - not requested (run with -Client)' }
+elseif (-not $Matrix) { $clientLine = '[SKIP] client view cases - not requested (run with -Client or -Matrix)' }
+
+# --- visual matrix: every on-screen case at simulated latency (a second server instance, real client) ---
+$matrixLine = $null
+if ($Matrix) {
+    $matrixOut = Join-Path $PSScriptRoot ('tests\client\out\matrix_' + (Get-Date -Format 'yyyyMMdd_HHmmss'))
+    $mm = & (Join-Path $PSScriptRoot 'tests\client\Invoke-VisualMatrix.ps1') -ServerDir $ServerDir -ClientDir $ClientDir -OutDir $matrixOut -SelfCheck:$ClientSelfCheck -Port $Port -Ref $MatrixRef
+    $matrixLine = "[$($mm.Status)] $($mm.Name) - $($mm.Detail)"
+    if ($mm.Status -ne 'PASS') { $problems.Add('test: ' + $matrixLine) }
+    foreach ($p in $mm.Problems) { $problems.Add("visual matrix: $p") }
+    Write-Host "visual-matrix artefacts: $matrixOut"
+}
 
 # --- every other log the run touched ---
 $logs = @(Get-ChildItem $smLogs -Filter *.log -ErrorAction SilentlyContinue | Where-Object { $_.FullName -ne $testLog })
@@ -135,7 +152,8 @@ foreach ($l in $passed) { Write-Host (Remove-LogPrefix $l 'PASS') -ForegroundCol
 foreach ($l in $failed) { Write-Host (Remove-LogPrefix $l 'FAIL') -ForegroundColor Red }
 if ($summary) { Write-Host ($summary -replace '^.*?tests finished', 'tests finished') }
 $clientColour = if ($clientLine -match '^\[PASS\]') { 'DarkGreen' } elseif ($Client) { 'Red' } else { 'DarkYellow' }
-Write-Host $clientLine -ForegroundColor $clientColour
+if ($clientLine) { Write-Host $clientLine -ForegroundColor $clientColour }
+if ($matrixLine) { Write-Host $matrixLine -ForegroundColor $(if ($matrixLine -match '^\[PASS\]') { 'DarkGreen' } else { 'Red' }) }
 if ($problems.Count) {
     Write-Host "`nProblems ($($problems.Count)):" -ForegroundColor Red
     $problems | Select-Object -Unique | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
@@ -143,4 +161,8 @@ if ($problems.Count) {
     exit 1
 }
 Write-Host "`nRESULT: PASS" -ForegroundColor Green
-exit 0
+exit 0#   .	est.ps1 -Matrix        also run the visual matrix: every on-screen case at simulated 0, 50, 150 and
+#                              250 ms with the real client (about 10 min; leave the desktop alone).
+#                              -MatrixRef <git ref> measures another build (e.g. v0.0.b6-beta) instead of the
+#                              working tree; -ClientSelfCheck makes the matrix run with the plugin disabled.
+
