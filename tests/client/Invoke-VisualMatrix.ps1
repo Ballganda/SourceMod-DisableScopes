@@ -391,5 +391,5 @@ $md | Set-Content (Join-Path $OutDir 'matrix.md') -Encoding utf8
 $failed = @($results | Where-Object { -not $_.Pass })
 if ($totalClientShots -eq 0) { $problems.Add('the client screen showed no clip-counter change at all (ammo HUD channel did not work)') }
 $detail = "$($results.Count - $failed.Count)/$($results.Count) (case, latency) results pass; record: $(Join-Path $OutDir 'matrix.md')"
-foreach ($f in $failed | Select-Object -First 40) { $detail += "; [$($f.Lag) ms] $($f.Case): $($f.Detail)" }
+foreach ($f in @($failed | Select-Object -First 40)) { $detail += "; [$($f.Lag) ms] $($f.Case): $($f.Detail)" }
 return New-Result $(if ($failed.Count -eq 0 -and $totalClientShots -gt 0) { 'PASS' } else { 'FAIL' }) $detail @($results)
