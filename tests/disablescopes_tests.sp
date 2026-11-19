@@ -40,7 +40,7 @@ enum
 	OP_INIT,        // find the bot, save its spawn, make it harmless
 	OP_CVARS,       // arg = bitmask
 	OP_WEAPON,      // arg = weapon index
-	OP_STATE,       // arg = state index, arg2 = 1 keeps the scope
+	OP_STATE,       // arg = state index; arg2 bit 1 keeps the scope, bit 2 keeps the weapon's attack timers
 	OP_SCOPE,       // arg = hold secondary attack 1/0
 	OP_FIRE,        // arg = hold primary attack 1/0
 	OP_RELOAD,
@@ -55,7 +55,9 @@ enum
 {
 	K_SCOPE = 0,    // scope rule: allowed or blocked as the cvars say
 	K_UNSCOPED,     // player must not be scoped
-	K_FIRE          // primary fire must have registered
+	K_FIRE,         // primary fire must have registered
+	K_NOZOOMBLOCKED,// no command since the last state change ended zoomed in a blocked state
+	K_NSAQUIET      // the weapon's next-secondary-attack time was not rewritten on most blocked ticks
 };
 
 enum
@@ -119,6 +121,10 @@ bool g_duck = false;
 int g_postButtons = 0;
 int g_shots = 0;
 int g_shotsAtFire = 0;
+int g_zoomBlockedCmds = 0;   // commands that ended zoomed in a blocked state (seen at the next command)
+int g_blockedCmds = 0;       // commands seen in a blocked state since the last state change
+int g_nsaChanges = 0;        // of those, how many saw a different next-secondary-attack time
+float g_lastNsa = -1.0;
 
 public Plugin myinfo =
 {
@@ -174,6 +180,7 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 	{
 		return Plugin_Continue;
 	}
+	ObserveCommandStart(client);
 	buttons &= ~(IN_ATTACK | IN_ATTACK2 | IN_RELOAD | IN_DUCK);
 	if (g_press2)
 	{
@@ -199,6 +206,40 @@ public void OnPlayerRunCmdPost(int client, int buttons, int impulse, const float
 	if (client == g_bot)
 	{
 		g_postButtons = buttons;
+	}
+}
+
+// Runs before the plugin under test, so it sees what the previous command left after every plugin ran.
+void ObserveCommandStart(int client)
+{
+	if (!IsPlayerAlive(client))
+	{
+		return;
+	}
+	int state = (GetEntityFlags(client) & FL_ONGROUND) ? S_GROUND : S_JUMP;
+	if (!ExpectBlocked(g_mask, g_weapon, state))
+	{
+		g_lastNsa = -1.0;
+		return;
+	}
+	int fov = GetEntProp(client, Prop_Send, "m_iFOV");
+	if (fov > 0 && fov < 90)
+	{
+		g_zoomBlockedCmds++;
+	}
+	int w = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
+	if (w > 0)
+	{
+		float nsa = GetEntPropFloat(w, Prop_Send, "m_flNextSecondaryAttack");
+		if (g_lastNsa >= 0.0)
+		{
+			g_blockedCmds++;
+			if (nsa != g_lastNsa)
+			{
+				g_nsaChanges++;
+			}
+		}
+		g_lastNsa = nsa;
 	}
 }
 
@@ -318,9 +359,27 @@ void BuildQueue()
 		Op(OP_SCOPE, 0);
 		Op(OP_STATE, S_JUMP, 1);
 		Check(K_UNSCOPED, "scoped then jump: %s is unscoped", g_weapons[w]);
+		Check(K_NOZOOMBLOCKED, "scoped then jump: %s unscoped in the command that left the ground", g_weapons[w]);
 		Op(OP_STATE, S_GROUND);
 		Op(OP_SCOPE, 1);
 		Check(K_SCOPE, "back on ground: %s scopes again", g_weapons[w]);
+		Op(OP_SCOPE, 0);
+	}
+
+	// 3b. blocked in the air for a while, then land with the weapon's timers left as the plugin set
+	//     them: the scope works again at once, and the blocked ticks did not each rewrite the timer
+	for (int w = 0; w < W_UNRESTRICTED; w++)
+	{
+		Op(OP_CVARS, M_DEFAULT);
+		Op(OP_WEAPON, w);
+		Op(OP_STATE, S_WATER);
+		Op(OP_SCOPE, 1);
+		Op(OP_WAIT, 2);
+		Check(K_NSAQUIET, "blocked in the air: %s next-secondary-attack not resent every tick", g_weapons[w]);
+		Op(OP_SCOPE, 0);
+		Op(OP_STATE, S_GROUND, 2);
+		Op(OP_SCOPE, 1);
+		Check(K_SCOPE, "landed, timers untouched: %s scopes again", g_weapons[w]);
 		Op(OP_SCOPE, 0);
 	}
 
@@ -597,7 +656,7 @@ bool Execute(int op, int arg, int arg2)
 			}
 			g_state = arg;
 			EnsureWeapon();
-			ApplyState(arg, arg2 == 0);
+			ApplyState(arg, (arg2 & 1) == 0, (arg2 & 2) == 0);
 			return true;
 		}
 		case OP_SCOPE:
@@ -709,8 +768,12 @@ void EnsureWeapon()
 	}
 }
 
-void ApplyState(int state, bool resetScope)
+void ApplyState(int state, bool resetScope, bool resetTimers)
 {
+	g_zoomBlockedCmds = 0;
+	g_blockedCmds = 0;
+	g_nsaChanges = 0;
+	g_lastNsa = -1.0;
 	float v[3];
 	float pos[3];
 	pos[0] = g_spawn[0];
@@ -723,7 +786,7 @@ void ApplyState(int state, bool resetScope)
 		SetEntProp(g_bot, Prop_Send, "m_iFOV", 90);
 	}
 	int w = GetEntPropEnt(g_bot, Prop_Send, "m_hActiveWeapon");
-	if (w > 0)
+	if (w > 0 && resetTimers)
 	{
 		SetEntPropFloat(w, Prop_Send, "m_flNextPrimaryAttack", 0.0);
 		SetEntPropFloat(w, Prop_Send, "m_flNextSecondaryAttack", 0.0);
@@ -807,6 +870,17 @@ void DoCheck(int kind, int nameIdx)
 		{
 			ok = (g_shots > g_shotsAtFire);
 			Format(detail, sizeof(detail), "expected a registered shot, observed %d", g_shots - g_shotsAtFire);
+		}
+		case K_NOZOOMBLOCKED:
+		{
+			ok = (g_zoomBlockedCmds == 0);
+			Format(detail, sizeof(detail), "expected no zoomed command in a blocked state, observed %d", g_zoomBlockedCmds);
+		}
+		case K_NSAQUIET:
+		{
+			// a refresh now and then is fine; every tick is the Beta 6 resend
+			ok = (g_blockedCmds >= 10 && g_nsaChanges * 4 <= g_blockedCmds);
+			Format(detail, sizeof(detail), "expected at most a quarter of %d blocked commands to see a new time, observed %d", g_blockedCmds, g_nsaChanges);
 		}
 	}
 	Report(ok, name, ok ? "" : detail);

@@ -32,6 +32,17 @@ ConVar g_cvDisableOnGround = null;
 // OnPlayerRunCmd exits on this one check; everything else runs only when it is set.
 bool g_bHoldsRestricted[MAXPLAYERS + 1];
 
+// While a client is blocked the plugin holds its weapon's next-secondary-attack time at least
+// NSA_REFRESH seconds ahead (topping it up to NSA_HOLD), so the networked value stays ahead of the
+// client's predicted clock up to that much round trip, without a resend every tick.
+#define NSA_HOLD 1.0
+#define NSA_REFRESH 0.6
+
+bool g_bBlocking[MAXPLAYERS + 1];
+int g_iBlockWeapon[MAXPLAYERS + 1];       // entity reference of the weapon whose timer is held
+float g_fWrittenNSA[MAXPLAYERS + 1];      // the value last written, or last seen, while holding
+float g_fRestoreNSA[MAXPLAYERS + 1];      // the weapon's own value, put back when the hold ends
+
 // Cvar values mirrored by change hooks so the per-tick path never reads a ConVar.
 bool g_bEnabled = true;
 bool g_bBlockInAir = true;
@@ -111,12 +122,14 @@ public void OnConfigsExecuted()
 public void OnClientPutInServer(int client)
 {
     g_bHoldsRestricted[client] = false;
+    g_bBlocking[client] = false;
     HookClient(client);
 }
 
 public void OnClientDisconnect(int client)
 {
     g_bHoldsRestricted[client] = false;
+    g_bBlocking[client] = false;
 }
 
 void HookClient(int client)
@@ -184,14 +197,59 @@ void RefreshClient(int client)
 {
     g_bHoldsRestricted[client] = false;
 
-    if (!g_bEnabled || !IsClientInGame(client) || !IsPlayerAlive(client))
+    int activeWeapon = -1;
+    if (g_bEnabled && IsClientInGame(client) && IsPlayerAlive(client))
+    {
+        activeWeapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
+        if (activeWeapon > 0 && IsValidEntity(activeWeapon))
+            g_bHoldsRestricted[client] = IsNoScopeWeapon(activeWeapon);
+    }
+
+    // A hold on a weapon that is no longer the restricted one in hand ends now, not at the next tick.
+    if (g_bBlocking[client] &&
+        (!g_bHoldsRestricted[client] || EntRefToEntIndex(g_iBlockWeapon[client]) != activeWeapon))
+    {
+        ReleaseHold(client);
+    }
+}
+
+// Put back the weapon's own next-secondary-attack time, unless the game has set a new one since.
+void ReleaseHold(int client)
+{
+    g_bBlocking[client] = false;
+
+    int weapon = EntRefToEntIndex(g_iBlockWeapon[client]);
+    if (weapon <= 0)
         return;
 
-    int activeWeapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
-    if (activeWeapon <= 0 || !IsValidEntity(activeWeapon))
-        return;
+    if (GetEntPropFloat(weapon, Prop_Send, "m_flNextSecondaryAttack") == g_fWrittenNSA[client])
+        SetEntPropFloat(weapon, Prop_Send, "m_flNextSecondaryAttack", g_fRestoreNSA[client]);
+}
 
-    g_bHoldsRestricted[client] = IsNoScopeWeapon(activeWeapon);
+// Keep the next-secondary-attack time at least NSA_REFRESH ahead; write only when it falls short.
+void HoldSecondaryAttack(int client, int activeWeapon)
+{
+    float nsa = GetEntPropFloat(activeWeapon, Prop_Send, "m_flNextSecondaryAttack");
+
+    if (!g_bBlocking[client])
+    {
+        g_bBlocking[client] = true;
+        g_iBlockWeapon[client] = EntIndexToEntRef(activeWeapon);
+        g_fRestoreNSA[client] = nsa;
+    }
+    else if (nsa != g_fWrittenNSA[client])
+    {
+        // The game set it (a shot): that is the weapon's own value now.
+        g_fRestoreNSA[client] = nsa;
+    }
+
+    float now = GetGameTime();
+    if (nsa < now + NSA_REFRESH)
+    {
+        nsa = now + NSA_HOLD;
+        SetEntPropFloat(activeWeapon, Prop_Send, "m_flNextSecondaryAttack", nsa);
+    }
+    g_fWrittenNSA[client] = nsa;
 }
 
 void GeneratePerInstanceConfig(const char[] cfgName, const char[][] defaultLines, int lineCount)
@@ -322,25 +380,16 @@ void CacheEntPropAvailability(int client, int activeWeapon)
     g_bEntPropsCached = true;
 }
 
-void ForceUnscope(int client, int activeWeapon, bool pressedAttack2)
+void ForceUnscope(int client, int activeWeapon)
 {
-    // Kill the predicted scope window (high-ping fix). The visual matrix shows the client scopes
-    // on screen at 0 ms if this is only written on a press, so it stays on every blocked tick.
-    SetEntPropFloat(activeWeapon, Prop_Send, "m_flNextSecondaryAttack", GetGameTime() + 0.2);
-
     // m_iFOV is 0 (b8 build) or the default view (b6 build) when not scoped.
     int fov = GetEntProp(client, Prop_Send, "m_iFOV");
-    bool scoped = (fov != 0 && fov != GetEntProp(client, Prop_Send, "m_iDefaultFOV"));
-
-    if (!scoped && !pressedAttack2)
+    if (fov == 0 || fov == GetEntProp(client, Prop_Send, "m_iDefaultFOV"))
         return;
 
     CacheEntPropAvailability(client, activeWeapon);
 
-    if (scoped)
-    {
-        SetEntProp(client, Prop_Send, "m_iFOV", 0);
-    }
+    SetEntProp(client, Prop_Send, "m_iFOV", 0);
 
     if (g_bHasZoomLevel)
     {
@@ -370,20 +419,34 @@ public Action OnPlayerRunCmd(
     if (!g_bHoldsRestricted[client])
         return Plugin_Continue;
 
+    // Ground state before this command's movement; the post hook judges the state after it.
+    if (ShouldBlockScope(client))
+        buttons &= ~IN_ATTACK2;
+
+    return Plugin_Continue;
+}
+
+// Movement has run: the state the command ends in decides. A jump is unscoped in the command that
+// left the ground, and the hold on secondary attack starts or ends with the blocked state.
+public void OnPlayerRunCmdPost(int client, int buttons, int impulse, const float vel[3], const float angles[3],
+    int weapon, int subtype, int cmdnum, int tickcount, int seed, const int mouse[2])
+{
+    if (!g_bHoldsRestricted[client])
+        return;
+
     if (!ShouldBlockScope(client))
-        return Plugin_Continue;
+    {
+        if (g_bBlocking[client])
+            ReleaseHold(client);
+        return;
+    }
 
     int activeWeapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
     if (activeWeapon <= 0)
-        return Plugin_Continue;
+        return;
 
-    bool pressedAttack2 = (buttons & IN_ATTACK2) != 0;
-
-    // Strip secondary attack so player cannot re-scope
-    buttons &= ~IN_ATTACK2;
-    ForceUnscope(client, activeWeapon, pressedAttack2);
-
-    return Plugin_Continue;
+    HoldSecondaryAttack(client, activeWeapon);
+    ForceUnscope(client, activeWeapon);
 }
 
 void CheckGameVersion()
