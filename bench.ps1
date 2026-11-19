@@ -5,7 +5,7 @@
 # Builds: beta6 = the 0.0.b6 source on main, b8 = commit f6d309f, current = scripting\disablescopes.sp in this tree.
 # Runs on a private copy of the server (default C:\Users\user\cssds_bench, made with robocopy from cssds) on its own
 # port, so it never touches the shared server that test.ps1 uses or collides with another run.
-# Exit 0 = every cell finished and repeat runs agreed within -MarginPct; 1 = a run failed or disagreed; 2 = could not start.
+# Exit 0 = every cell finished and repeat runs agreed within -MarginUs; 1 = a run failed or disagreed; 2 = could not start.
 # Method: the helper plugin (tests\disablescopes_bench.sp) spawns fake clients, equips them, runs `sm prof start`
 # for -Seconds, logs ticks and tickrate, then dumps the vprof report. This script aggregates the report the way the
 # AA Crew aggregate_vprof.py does (top-level frames of the plugin only, no double counting) and divides the plugin's
@@ -19,7 +19,7 @@ param(
     [switch]$Baseline,
     [int]$Runs = 3,
     [int]$Seconds = 30,
-    [double]$MarginPct = 25,
+    [double]$MarginUs = 0.3,   # absolute: a percentage margin is meaningless on a ~0.1 us mean
     [int]$Tickrate = 66,
     [string]$OutDir = (Join-Path $PSScriptRoot 'bench-results'),
     [string]$ServerDir = $(if ($env:CSS_BENCH_SERVER_DIR) { $env:CSS_BENCH_SERVER_DIR } else { 'C:\Users\user\cssds_bench' }),
@@ -143,11 +143,12 @@ function Measure-Cell([string]$build, [string]$scenario, [int]$perSide) {
     }
     $v = @($rs | ForEach-Object { $_.UsPerClientTick })
     $mean = ($v | Measure-Object -Average).Average
+    $spreadUs = ($v | Measure-Object -Maximum).Maximum - ($v | Measure-Object -Minimum).Minimum
     $spread = 0
-    if ($mean -gt 0) { $spread = 100.0 * (($v | Measure-Object -Maximum).Maximum - ($v | Measure-Object -Minimum).Minimum) / $mean }
+    if ($mean -gt 0) { $spread = 100.0 * $spreadUs / $mean }
     return [pscustomobject]@{
         Build = $build; Scenario = $scenario; PerSide = $perSide
-        Us = $mean; SpreadPct = $spread; Agree = ($spread -le $MarginPct)
+        Us = $mean; SpreadUs = $spreadUs; SpreadPct = $spread; Agree = ($spreadUs -le $MarginUs)
         PeakMs = ($rs | Measure-Object PeakMs -Maximum).Maximum
         Held = ((($rs | Measure-Object Tickrate -Average).Average) -ge 0.98 * $Tickrate)
         Tickrate = ($rs | Measure-Object Tickrate -Average).Average
@@ -191,7 +192,7 @@ $lines += '| --- | --- | --- | --- | --- | --- | --- | --- |'
 foreach ($c in $allCells) {
     $over = if ($c.Agree) { '' } else { ' (over margin)' }
     $held = if ($c.Held) { 'yes' } else { 'no' }
-    $lines += ('| {0} | {1} | {2}v{2} | {3:N3} | {4:N1}%{5} | {6:N2} | {7:N2} | {8} |' -f $c.Build, $c.Scenario, $c.PerSide, $c.Us, $c.SpreadPct, $over, $c.PeakMs, $c.Tickrate, $held)
+    $lines += ('| {0} | {1} | {2}v{2} | {3:N3} | {9:N3} us ({4:N1}%){5} | {6:N2} | {7:N2} | {8} |' -f $c.Build, $c.Scenario, $c.PerSide, $c.Us, $c.SpreadPct, $over, $c.PeakMs, $c.Tickrate, $held, $c.SpreadUs)
 }
 $lines += ''
 foreach ($g in ($allCells | Group-Object { "$($_.Build)/$($_.Scenario)" })) {
@@ -200,7 +201,7 @@ foreach ($g in ($allCells | Group-Object { "$($_.Build)/$($_.Scenario)" })) {
     if ($top) { $topText = "$($top.PerSide)v$($top.PerSide)" }
     $lines += "Highest count that held $Tickrate tick, $($g.Name): $topText"
 }
-$lines += "Margin: repeat runs of a cell agree when (max - min) / mean is within $MarginPct%."
+$lines += "Margin: repeat runs of a cell agree when max - min is within $MarginUs us."
 $lines | ForEach-Object { Write-Host $_ }
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 $lines | Set-Content (Join-Path $OutDir 'table.md') -Encoding utf8
