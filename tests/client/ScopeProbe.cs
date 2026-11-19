@@ -1,4 +1,5 @@
-﻿// Frame-capture probe for the scope spike (ticket #4). Loaded by Run-ScopeSpike.ps1 with Add-Type.
+﻿// Frame-capture probe for the client-view channel (from the ticket #4 spike). Loaded with Add-Type by
+// tests/client/Invoke-ClientCase.ps1 and tests/spike/Run-ScopeSpike.ps1.
 // Samples the CS:S client area from the screen as fast as GDI allows and classifies each sample as
 // scoped or unscoped: a sniper scope overlay paints the left and right screen edges solid black,
 // so four edge points (left and right, at 40% and 60% height) all dark = scoped.

@@ -1,3 +1,4 @@
 plugins/
 tests/spike/out/
 __pycache__/
+tests/client/out/

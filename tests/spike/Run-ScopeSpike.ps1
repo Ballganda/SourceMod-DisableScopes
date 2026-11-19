@@ -36,7 +36,7 @@ foreach ($l in $Lags) { if (-not $lagKeys.ContainsKey($l)) { Write-Error "lag $l
 $exe = Join-Path $ServerDir 'srcds.exe'
 if (Get-Process srcds -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe }) { Write-Error "srcds already running from $ServerDir"; exit 2 }
 if (Get-Process cstrike_win64, cstrike, hl2 -ErrorAction SilentlyContinue) { Write-Error 'a CS:S client is already running'; exit 2 }
-Add-Type -Path (Join-Path $PSScriptRoot 'ScopeProbe.cs') -ReferencedAssemblies System.Drawing
+Add-Type -Path (Join-Path $PSScriptRoot '..\client\ScopeProbe.cs') -ReferencedAssemblies System.Drawing
 
 # Samples the screen while the client plays the demo; a snapshot every 3 s shows what the probe saw.
 function Watch-Playback($hwnd, [int]$seconds) {
