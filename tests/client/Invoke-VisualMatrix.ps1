@@ -19,8 +19,9 @@ On-screen results exist for weapons whose scope paints the black overlay the pro
 scout, G3SG1, SG550). SG552 and AUG zoom without an overlay; they stay in the server-state suite.
 
 Case verdicts (the client's shot is a change of the clip counter on its ammo HUD, read from the screen):
-  blocked   no scoped screen time in the window (0, 50, 150 ms) or at most one probe sample (250 ms);
-            no zoomed command in a blocked state on the server
+  blocked   scoped screen time only within one round trip (latency plus 100 ms) of the window key
+            that starts the block, none after it (issues #7, #9); no zoomed command in a blocked
+            state on the server
   allowed   scoped screen time of at least 300 ms in the window and a zoomed command on the server
   shots     every shot the client shows is a shot the server registered (counts per case equal),
             and a shot in a blocked state has an unzoomed field of view on the server
@@ -52,7 +53,7 @@ $pluginSmx = Join-Path $sm 'plugins\disablescopes.smx'
 $serverCsv = Join-Path $sm 'logs\disablescopes_matrix.csv'
 $problems = New-Object System.Collections.Generic.List[string]
 
-$FrameMs = 45             # one probe sample (about 31 ms) plus slack: the "one scoped frame" allowed at 250 ms
+$RoundTripSlackMs = 100   # a blocked scope may show until latency plus this after the block starts (issues #7, #9)
 $AllowedMinMs = 300       # an allowed scope must show at least this long
 # Only function keys reach the client reliably (letters and digits did not fire their binds). Cases and
 # latencies are stepped through alias chains: NextCase (F3) runs the next case alias, NextLag (F4) the next
@@ -195,8 +196,11 @@ function Measure-Case([int]$idx, [int]$lag, $capture, $blocks) {
     }
 
     if ($c.Ex -eq 'blocked') {
-        if ($lag -le 150) { if ($ov.Ms -gt 0) { $why.Add(('blocked, but the screen showed a scope for {0:F0} ms (allowed: none at {1} ms)' -f $ov.Ms, $lag)) } }
-        else { if ($ov.Ms -gt $FrameMs -or $ov.Count -gt 1) { $why.Add(('blocked, but the screen showed a scope for {0:F0} ms in {1} interval(s) (allowed: one frame at {2} ms)' -f $ov.Ms, $ov.Count, $lag)) } }
+        # Issues #7/#9 (user-approved): a blocked scope may show within one round trip (latency plus
+        # RoundTripSlackMs) after the block starts at the window key, and none after that.
+        $graceMs = $lag + $RoundTripSlackMs
+        $late = Get-ScopedOverlap $capture ($win + $graceMs) ($win + $c.WinMs)
+        if ($late.Ms -gt 0) { $why.Add(('blocked, but the screen showed a scope for {0:F0} ms after the {1} ms round-trip allowance' -f $late.Ms, $graceMs)) }
         if ($zoomBlocked.Count) { $why.Add("server fov zoomed in $($zoomBlocked.Count) cmds while the scope was blocked") }
     }
     else {
@@ -391,5 +395,5 @@ $md | Set-Content (Join-Path $OutDir 'matrix.md') -Encoding utf8
 $failed = @($results | Where-Object { -not $_.Pass })
 if ($totalClientShots -eq 0) { $problems.Add('the client screen showed no clip-counter change at all (ammo HUD channel did not work)') }
 $detail = "$($results.Count - $failed.Count)/$($results.Count) (case, latency) results pass; record: $(Join-Path $OutDir 'matrix.md')"
-foreach ($f in $failed | Select-Object -First 40) { $detail += "; [$($f.Lag) ms] $($f.Case): $($f.Detail)" }
-return New-Result $(if ($failed.Count -eq 0 -and $totalClientShots -gt 0) { 'PASS' } else { 'FAIL' }) $detail @($results)
+foreach ($f in @($failed | Select-Object -First 40)) { $detail += "; [$($f.Lag) ms] $($f.Case): $($f.Detail)" }
+return New-Result $(if ($failed.Count -eq 0 -and $totalClientShots -gt 0) { 'PASS' } else { 'FAIL' }) $detail $results.ToArray()   # @() of a generic List as an argument throws "Argument types do not match" on PowerShell 5.1
