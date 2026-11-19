@@ -16,7 +16,8 @@ param(
     [string]$ClientDir = $(if ($env:CSS_CLIENT_DIR) { $env:CSS_CLIENT_DIR } else { 'C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Source' }),
     [string]$ServerDir = $(if ($env:CSS_SERVER_DIR) { $env:CSS_SERVER_DIR } else { 'C:\Users\user\cssds' }),
     [string]$Map = 'de_dust2',
-    [int]$TimeoutSec = 120
+    [int]$TimeoutSec = 400,
+    [int]$Port = 27015
 )
 $game = Join-Path $ServerDir 'cstrike'
 $smLogs = Join-Path $game 'addons\sourcemod\logs'
@@ -83,7 +84,7 @@ if (-not $NoBuild) {
 
 $before = Get-LogSizes
 $inject = [int][bool]$InjectError
-$srcdsArgs = "-console -game cstrike -condebug -tickrate 100 +sv_lan 1 +maxplayers 10 +bot_quota 0 " +
+$srcdsArgs = "-console -game cstrike -condebug -tickrate 100 -port $Port +sv_lan 1 +maxplayers 10 +bot_quota 0 " +
              "+disablescopes_test_autorun 1 +disablescopes_test_inject_error $inject +map $Map"
 Write-Host "Starting srcds ($Map)..."
 $proc = Start-Process (Join-Path $ServerDir 'srcds.exe') -ArgumentList $srcdsArgs -WorkingDirectory $ServerDir -PassThru
