@@ -118,7 +118,9 @@ function Invoke-Run([string]$build, [string]$scenario, [int]$perSide, [string]$t
     New-Item -ItemType Directory -Force $OutDir | Out-Null
     $report | Set-Content (Join-Path $OutDir "vprof-$tag.txt") -Encoding utf8
     $cost = Get-PluginCost $report 'disablescopes'
-    if (-not $cost -or $cost.Calls -eq 0) { throw 'the plugin does not appear in the vprof report' }
+    if (-not $cost) { throw 'no hierarchical call graph in the vprof report' }
+    # An event-driven build can make no call in the window: that is zero cost, but only if it was running.
+    if ($cost.Calls -eq 0 -and $kv['plugin'] -ne 1) { throw 'the plugin does not appear in the vprof report and was not running' }
     $clientTicks = $kv['clients'] * $kv['ticks']
     $expectHold = if ($sc -eq 1) { $kv['clients'] } else { 0 }
     return [pscustomobject]@{

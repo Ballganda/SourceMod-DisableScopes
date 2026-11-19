@@ -192,8 +192,11 @@ public Action Timer_Finish(Handle timer)
 	int alive = CountAlive();
 	int holding = CountHoldingRestricted();
 	bool held = rate >= g_cvTickrate.FloatValue * 0.98;
-	LogToFileEx(g_logPath, "BENCH clients=%d alive=%d holding=%d scenario=%d ticks=%d seconds=%.2f tickrate=%.2f held=%d",
-		g_userCount, alive, holding, g_cvScenario.IntValue, ticks, secs, rate, held ? 1 : 0);
+	// plugin=1: the plugin under test was running, so its absence from the profile means it made no calls.
+	Handle plugin = FindPluginByFile("disablescopes.smx");
+	bool running = plugin != null && GetPluginStatus(plugin) == Plugin_Running;
+	LogToFileEx(g_logPath, "BENCH clients=%d alive=%d holding=%d scenario=%d ticks=%d seconds=%.2f tickrate=%.2f held=%d plugin=%d",
+		g_userCount, alive, holding, g_cvScenario.IntValue, ticks, secs, rate, held ? 1 : 0, running ? 1 : 0);
 	ServerCommand("sm prof dump vprof");
 	CreateTimer(3.0, Timer_Quit, _, TIMER_FLAG_NO_MAPCHANGE);
 	return Plugin_Stop;
