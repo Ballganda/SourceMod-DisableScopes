@@ -784,6 +784,7 @@ void DoCheck(int kind, int nameIdx)
 	}
 	int fov = GetEntProp(g_bot, Prop_Send, "m_iFOV");
 	bool attack2 = (g_postButtons & IN_ATTACK2) != 0;
+	bool scoped = (fov > 0 && fov < 90);   // 0 or 90 both mean the default view
 	bool zoomer = (g_weapon != W_UNRESTRICTED);
 	bool ok = false;
 	switch (kind)
@@ -792,14 +793,14 @@ void DoCheck(int kind, int nameIdx)
 		{
 			bool blocked = ExpectBlocked(g_mask, g_weapon, g_state);
 			// allowed: the plugin let secondary attack through, and a scope weapon zoomed
-			bool allowed = attack2 && (!zoomer || fov < 90);
-			bool denied = !attack2 && (!zoomer || fov >= 90);
+			bool allowed = attack2 && (!zoomer || scoped);
+			bool denied = !attack2 && (!zoomer || !scoped);
 			ok = blocked ? denied : allowed;
 			Format(detail, sizeof(detail), "expected %s, observed attack2=%d fov=%d", blocked ? "blocked" : "allowed", attack2, fov);
 		}
 		case K_UNSCOPED:
 		{
-			ok = (fov >= 90);
+			ok = !scoped;
 			Format(detail, sizeof(detail), "expected unscoped, observed fov=%d", fov);
 		}
 		case K_FIRE:
