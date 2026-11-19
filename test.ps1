@@ -8,7 +8,8 @@ param(
     [switch]$InjectError,
     [string]$ServerDir = $(if ($env:CSS_SERVER_DIR) { $env:CSS_SERVER_DIR } else { 'C:\Users\user\cssds' }),
     [string]$Map = 'de_dust2',
-    [int]$TimeoutSec = 120
+    [int]$TimeoutSec = 400,
+    [int]$Port = 27015
 )
 $game = Join-Path $ServerDir 'cstrike'
 $smLogs = Join-Path $game 'addons\sourcemod\logs'
@@ -57,7 +58,7 @@ function Test-Benign([string]$line) {
 
 $problems = New-Object System.Collections.Generic.List[string]
 
-if (Get-Process srcds -ErrorAction SilentlyContinue) {
+if (Get-Process srcds -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq (Join-Path $ServerDir 'srcds.exe') }) {
     Write-Error 'srcds.exe is already running; stop it first (the suite needs its own server instance).'
     exit 2
 }
@@ -68,7 +69,7 @@ if (-not $NoBuild) {
 
 $before = Get-LogSizes
 $inject = [int][bool]$InjectError
-$srcdsArgs = "-console -game cstrike -condebug -tickrate 100 +sv_lan 1 +maxplayers 10 +bot_quota 0 " +
+$srcdsArgs = "-console -game cstrike -condebug -tickrate 100 -port $Port +sv_lan 1 +maxplayers 10 +bot_quota 0 " +
              "+disablescopes_test_autorun 1 +disablescopes_test_inject_error $inject +map $Map"
 Write-Host "Starting srcds ($Map)..."
 $proc = Start-Process (Join-Path $ServerDir 'srcds.exe') -ArgumentList $srcdsArgs -WorkingDirectory $ServerDir -PassThru
