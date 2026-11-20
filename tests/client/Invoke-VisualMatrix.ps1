@@ -25,11 +25,24 @@ Case verdicts (the client's shot is a change of the clip counter on its ammo HUD
   allowed   scoped screen time of at least 300 ms in the window and a zoomed command on the server
   shots     every shot the client shows is a shot the server registered (counts per case equal),
             and a shot in a blocked state has an unzoomed field of view on the server
+Remote mode (-Remote <ssh alias>, issue #10): no local srcds. The local client connects to the remote server
+(address from `ssh -G <alias>`, port -Port) and the matrix runs at the real ping instead of simulated latency
+(one pass; the helper's dsc_lag only logs a row). Needs the remote build of disablescopes_matrix (version ending
+in -remote, from tests\remote\Build-RemoteHelpers.ps1) already loaded by the deploy agent, and no other human on the
+server. Server-side numbers (the helper's csv) are read over ssh; the ping comes from the client's own `status`
+output (client name dsc_probe), sampled before and after the run; the blocked-scope allowance is that ping plus
+the usual 100 ms. The run changes mp_* and plugin cvars: they are recorded first and restored afterwards. The
+server is never restarted. See tests\remote\RemoteLib.ps1 for the ssh rules.
+
 Returns one object: Status (PASS, FAIL or SKIP), Name, Detail, Problems (setup faults), Rows.
 A SKIP means the matrix could not run; test.ps1 counts it as a failure.
 #>
+[CmdletBinding(DefaultParameterSetName = 'Local')]
 param(
-    [Parameter(Mandatory)][string]$ServerDir,
+    [Parameter(Mandatory, ParameterSetName = 'Local')][string]$ServerDir,
+    [Parameter(Mandatory, ParameterSetName = 'Remote')][string]$Remote,   # ssh alias of the remote server (regs1)
+    [Parameter(ParameterSetName = 'Remote')][string]$RemoteSmDir = '',
+    [Parameter(ParameterSetName = 'Remote')][switch]$NoRestore,
     [Parameter(Mandatory)][string]$ClientDir,
     [Parameter(Mandatory)][string]$OutDir,
     [switch]$SelfCheck,
@@ -40,17 +53,28 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path (Split-Path $PSScriptRoot)
-$caseName = 'visual matrix: every on-screen case at simulated latency ' + ($Lags -join '/') + ' ms'
-$game = Join-Path $ServerDir 'cstrike'
-$sm = Join-Path $game 'addons\sourcemod'
+$remoteMode = ($PSCmdlet.ParameterSetName -eq 'Remote')
+if ($remoteMode) {
+    $Lags = @(0)    # one pass at the real ping; the lag chain still runs once (its row is logged, nothing is simulated)
+    $caseName = "visual matrix: every on-screen case at real ping to $Remote"
+    . (Join-Path (Split-Path $PSScriptRoot) 'remote\RemoteLib.ps1')
+}
+else { $caseName = 'visual matrix: every on-screen case at simulated latency ' + ($Lags -join '/') + ' ms' }
+if (-not $remoteMode) {
+    $game = Join-Path $ServerDir 'cstrike'
+    $sm = Join-Path $game 'addons\sourcemod'
+}
 $clientGame = Join-Path $ClientDir 'cstrike'
 $clientCfgDir = Join-Path $clientGame 'cfg'
 $clientLog = Join-Path $clientGame 'console.log'
 $steam = Join-Path (Split-Path (Split-Path (Split-Path $ClientDir))) 'steam.exe'
 $clientNames = 'cstrike_win64', 'cstrike', 'hl2'
-$helperSmx = Join-Path $sm 'plugins\disablescopes_matrix.smx'
-$pluginSmx = Join-Path $sm 'plugins\disablescopes.smx'
-$serverCsv = Join-Path $sm 'logs\disablescopes_matrix.csv'
+if (-not $remoteMode) {
+    $helperSmx = Join-Path $sm 'plugins\disablescopes_matrix.smx'
+    $pluginSmx = Join-Path $sm 'plugins\disablescopes.smx'
+    $serverCsv = Join-Path $sm 'logs\disablescopes_matrix.csv'
+}
+$PingMs = 0.0             # remote: the worst ping the client reported; added to the blocked-scope allowance
 $problems = New-Object System.Collections.Generic.List[string]
 
 $RoundTripSlackMs = 100   # a blocked scope may show until latency plus this after the block starts (issues #7, #9)
@@ -58,7 +82,7 @@ $AllowedMinMs = 300       # an allowed scope must show at least this long
 # Only function keys reach the client reliably (letters and digits did not fire their binds). Cases and
 # latencies are stepped through alias chains: NextCase (F3) runs the next case alias, NextLag (F4) the next
 # latency alias, ResetCases (F5) rewinds the case chain.
-$VK = @{ NextCase = 0x72; NextLag = 0x73; ResetCases = 0x74; Scope = 0x75; Air = 0x76; Jump = 0x77; AirFire = 0x78; Fire = 0x79; End = 0x7A }   # F2..F11
+$VK = @{ Ping = 0x7B; NextCase = 0x72; NextLag = 0x73; ResetCases = 0x74; Scope = 0x75; Air = 0x76; Jump = 0x77; AirFire = 0x78; Fire = 0x79; End = 0x7A }   # F2..F11
 
 # Weapon -> restriction cvar index in the rule tuple (awp, scout, auto, weak, inair, onground).
 $weaponRule = @{ weapon_awp = 0; weapon_scout = 1; weapon_g3sg1 = 2; weapon_sg550 = 2 }
@@ -198,7 +222,7 @@ function Measure-Case([int]$idx, [int]$lag, $capture, $blocks) {
     if ($c.Ex -eq 'blocked') {
         # Issues #7/#9 (user-approved): a blocked scope may show within one round trip (latency plus
         # RoundTripSlackMs) after the block starts at the window key, and none after that.
-        $graceMs = $lag + $RoundTripSlackMs
+        $graceMs = $lag + $script:PingMs + $RoundTripSlackMs
         $late = Get-ScopedOverlap $capture ($win + $graceMs) ($win + $c.WinMs)
         if ($late.Ms -gt 0) { $why.Add(('blocked, but the screen showed a scope for {0:F0} ms after the {1} ms round-trip allowance' -f $late.Ms, $graceMs)) }
         if ($zoomBlocked.Count) { $why.Add("server fov zoomed in $($zoomBlocked.Count) cmds while the scope was blocked") }
@@ -224,7 +248,38 @@ function Measure-Case([int]$idx, [int]$lag, $capture, $blocks) {
     return [pscustomobject]@{ Pass = ($why.Count -eq 0); Why = $why; Facts = $facts }
 }
 
+# ---------- the helper's server csv: local file, or read over ssh in remote mode ----------
+$csvBase = 0   # remote: lines already in the csv before this run (earlier runs); only the rows after them count
+function Get-ServerCsvLines {
+    if ($remoteMode) {
+        $all = @((Invoke-RemoteBash "cd ~ && cat '$remoteCsv' 2>/dev/null" -AllowFail) -split "`n" | Where-Object { $_.Trim() })
+        if ($script:csvBase -gt 0 -and $all.Count -gt $script:csvBase) { return @($all[0]) + @($all[$script:csvBase..($all.Count - 1)]) }
+        if ($script:csvBase -gt 0) { return @($all[0]) }
+        return $all
+    }
+    if (Test-Path $serverCsv) { return @(Get-Content $serverCsv) } else { return @() }
+}
+function Test-ServerCsv([string]$prefix) { return (@(Get-ServerCsvLines | Where-Object { $_ -match "^$prefix" }).Count -gt 0) }
+
 # ---------- run ----------
+$remoteIp = $null; $remoteCsv = $null; $remoteVersion = ''; $restoreNeeded = $false
+if ($remoteMode) {
+    try {
+        Initialize-Remote $Remote $RemoteSmDir
+        $remoteCsv = "$($script:RemoteSmDir)/logs/disablescopes_matrix.csv"
+        $remoteIp = Get-RemoteHostAddress
+        $helper = @(Get-RemotePluginLines | Where-Object { $_ -match 'disablescopes_matrix' -and $_ -match '-remote' })
+        if (-not $helper.Count) { return New-Result 'SKIP' 'the remote build of the matrix helper is not loaded (a disablescopes_matrix whose version ends in -remote); build it with tests\remote\Build-RemoteHelpers.ps1 and have the deploy agent load it' }
+        $counts = Get-RemotePlayerCounts
+        if (-not $counts) { return New-Result 'SKIP' 'could not read the player counts from the remote status' }
+        if ($counts.Humans -gt 0) { return New-Result 'SKIP' "$($counts.Humans) human(s) already on the remote server; the helper takes the first real player and changes game cvars" }
+        $vl = @(Send-RemoteCommand 'sm_disablescopes_version' | Where-Object { $_ -match '"sm_disablescopes_version"\s*=\s*"([^"]*)"' }) | Select-Object -First 1
+        if (-not $vl) { return New-Result 'SKIP' 'the plugin under test is not loaded on the remote server' }
+        [void]($vl -match '"sm_disablescopes_version"\s*=\s*"([^"]*)"')
+        $remoteVersion = $Matches[1]
+    }
+    catch { return New-Result 'SKIP' "remote server not usable: $(Protect-Text "$_")" }
+}
 foreach ($p in @($steam, (Join-Path $ClientDir 'cstrike_win64.exe'))) {
     if (-not (Test-Path $p)) { return New-Result 'SKIP' "client not installed ($p not found)" }
 }
@@ -232,9 +287,12 @@ if (Get-Process $clientNames -ErrorAction SilentlyContinue) { return New-Result 
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 Add-Type -Path (Join-Path $PSScriptRoot 'ScopeProbe.cs') -ReferencedAssemblies System.Drawing
 
-$spcomp = Join-Path $sm 'scripting\spcomp.exe'
-& $spcomp (Join-Path $PSScriptRoot 'disablescopes_matrix.sp') "-i$sm\scripting\include" "-o$helperSmx" | Out-Null
-if ($LASTEXITCODE -ne 0) { return New-Result 'SKIP' 'disablescopes_matrix.sp failed to compile' }
+if ($Ref -and $remoteMode) { return New-Result 'SKIP' '-Ref measures a locally compiled build; the remote mode measures whatever the server has loaded' }
+if (-not $remoteMode) {
+    $spcomp = Join-Path $sm 'scripting\spcomp.exe'
+    & $spcomp (Join-Path $PSScriptRoot 'disablescopes_matrix.sp') "-i$sm\scripting\include" "-o$helperSmx" | Out-Null
+    if ($LASTEXITCODE -ne 0) { return New-Result 'SKIP' 'disablescopes_matrix.sp failed to compile' }
+}
 if ($Ref) {
     $src = Join-Path $OutDir 'disablescopes.sp'
     # the tag for Beta 6 predates the scripting/ folder
@@ -250,7 +308,8 @@ if ($Ref) {
     & $spcomp $src "-i$sm\scripting\include" "-o$pluginSmx" | Out-Null
     if ($LASTEXITCODE -ne 0) { return New-Result 'SKIP' "build $Ref failed to compile" }
 }
-$build = if ($Ref) { $Ref } else { 'working tree' }
+$build = if ($remoteMode) { "$Remote, plugin $remoteVersion" } elseif ($Ref) { $Ref } else { 'working tree' }
+$snapFile = Join-Path $OutDir 'remote_cvars_before.json'
 
 $srv = $null; $skip = $null; $cfgHashes = $null; $logOffset = 0
 try {
@@ -268,6 +327,7 @@ $cfg.Add('alias dsc_fire "+attack; wait 3; -attack"')
 $cfg.Add('bind F3 "dsc_cn"'); $cfg.Add('bind F4 "dsc_ln"'); $cfg.Add('bind F5 "alias dsc_cn dsc_cs0"')
 $cfg.Add('bind F6 "dsc_scope"'); $cfg.Add('bind F7 "dsc_air"'); $cfg.Add('bind F8 "dsc_jump"'); $cfg.Add('bind F9 "dsc_airfire"')
 $cfg.Add('bind F10 "dsc_fire"'); $cfg.Add('bind F11 "echo DSC_END"')
+$cfg.Add('alias dsc_ping "echo DSC_PING; status"'); $cfg.Add('bind F12 "dsc_ping"')
 for ($k = 0; $k -lt $Lags.Count; $k++) {          # latency chain: each press applies the next latency
     $next = ($k + 1) % $Lags.Count
     $cfg.Add("alias dsc_ls$k `"echo DSC_LAG $($Lags[$k]); dsc_lag $($Lags[$k]); alias dsc_ln dsc_ls$next`"")
@@ -281,9 +341,22 @@ for ($i = 0; $i -lt $cases.Count; $i++) {         # case chain: each press selec
 $cfg.Add('alias dsc_cn dsc_cs0')
 $cfg.Add('echo DSC_CFG_LOADED')
 $cfg | Set-Content (Join-Path $clientCfgDir 'dsc_matrix.cfg') -Encoding ascii
-Remove-Item $serverCsv -ErrorAction SilentlyContinue
+if (-not $remoteMode) { Remove-Item $serverCsv -ErrorAction SilentlyContinue }
 if (Test-Path $clientLog) { $logOffset = (Get-Item $clientLog).Length }
 
+if ($remoteMode) {
+    $snap = Save-CvarSnapshot $script:RunCvars $snapFile
+    $restoreNeeded = -not $NoRestore
+    Write-Host "recorded $($snap.Saved) server cvar(s) to $snapFile (restored at the end)"
+    $csvBase = Get-RemoteLineCount $remoteCsv
+    Write-Host "Connecting the client to $Remote (port $Port); the address is not printed."
+    Start-Process $steam -ArgumentList "-applaunch 240 -novid -windowed -w 1024 -h 768 -condebug +name dsc_probe +exec dsc_matrix.cfg +connect ${remoteIp}:$Port"
+    $deadline = (Get-Date).AddSeconds(240)
+    $ready = $false
+    while (-not $ready -and (Get-Date) -lt $deadline) { Start-Sleep 4; $ready = Test-ServerCsv 'ready' }
+    if (-not $ready) { throw 'client never became ready (no ready row from the remote helper)' }
+}
+else {
 $srcdsArgs = "-console -game cstrike -condebug -tickrate 100 -port $Port +sv_lan 1 +maxplayers 10 +bot_quota 0 " +
              "+disablescopes_matrix_selfcheck $([int][bool]$SelfCheck) +map $Map"
 Write-Host "Starting srcds for the visual matrix (port $Port, build $build)..."
@@ -300,6 +373,7 @@ while (-not $ready -and (Get-Date) -lt $deadline) {
     if ($srv.HasExited) { throw 'srcds exited before the client was ready' }
 }
 if (-not $ready) { throw 'client never became ready (no ready row from the helper)' }
+}
 $cli = Get-Process $clientNames -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero } | Select-Object -First 1
 if (-not $cli) { throw 'client window not found' }
 $hwnd = $cli.MainWindowHandle
@@ -312,7 +386,8 @@ Start-Sleep 1
 [ScopeProbe]::Key($hwnd, $VK.NextCase, 'baseline case')
 Start-Sleep 3
 [ScopeProbe]::Snapshot($hwnd, (Join-Path $OutDir 'baseline.png'))
-if (-not (Select-String -Path $serverCsv -Pattern '^case' -Quiet)) { throw 'injected key never reached the server (no case row); see baseline.png' }
+if ($remoteMode) { [ScopeProbe]::Key($hwnd, $VK.Ping, 'ping before') }
+if (-not (Test-ServerCsv 'case')) { throw 'injected key never reached the server (no case row); see baseline.png' }
 $d = ''
 if ([ScopeProbe]::Classify($hwnd, [ref]$d) -ne 0) { throw "baseline screen classifies as scoped (edges $d); see baseline.png" }
 
@@ -335,6 +410,7 @@ foreach ($lag in $Lags) {
     }
     Write-Host "  latency $lag ms done"
 }
+if ($remoteMode) { [ScopeProbe]::Key($hwnd, $VK.Ping, 'ping after'); Start-Sleep 1 }
 [ScopeProbe]::Key($hwnd, $VK.End, 'end')
 Start-Sleep 1
 [ScopeProbe]::Stop((Join-Path $OutDir 'live.csv'))
@@ -348,18 +424,44 @@ finally {
     if ($srv -and -not $srv.WaitForExit(15000)) { Stop-Process -Id $srv.Id -Force; $problems.Add('matrix srcds did not quit after the client left; it was killed') }
     Start-Sleep 2
     if ($cfgHashes) { Restore-ClientCfg $cfgHashes $cfgBackup }
-    Remove-Item $helperSmx -ErrorAction SilentlyContinue
-    if (Test-Path $helperSmx) { $problems.Add("helper plugin still deployed: $helperSmx") }
-    if (Test-Path $serverCsv) { Copy-Item $serverCsv (Join-Path $OutDir 'server.csv') -Force }
+    if ($remoteMode) {
+        try { Get-ServerCsvLines | Set-Content (Join-Path $OutDir 'server.csv') -Encoding ascii } catch { $problems.Add("could not read the remote csv: $(Protect-Text "$_")") }
+        if ($restoreNeeded) {
+            try {
+                $rr = Restore-CvarSnapshot $snapFile
+                Write-Host "server cvars restored: $(if ($rr.Restored.Count) { $rr.Restored -join ', ' } else { 'none changed' })"
+                foreach ($pp in $rr.Problems) { $problems.Add($pp) }
+            }
+            catch { $problems.Add("server cvar restore failed (run tests\remote\CvarSnapshot.ps1 -Action Restore -File $snapFile): $(Protect-Text "$_")") }
+        }
+    }
+    else {
+        Remove-Item $helperSmx -ErrorAction SilentlyContinue
+        if (Test-Path $helperSmx) { $problems.Add("helper plugin still deployed: $helperSmx") }
+        if (Test-Path $serverCsv) { Copy-Item $serverCsv (Join-Path $OutDir 'server.csv') -Force }
+    }
     if (Test-Path $clientLog) {
         $fs = New-Object IO.FileStream($clientLog, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
         try { $b = New-Object byte[] $fs.Length; [void]$fs.Read($b, 0, $b.Length) } finally { $fs.Dispose() }
         $o = if ($logOffset -le $b.Length) { $logOffset } else { 0 }
-        [IO.File]::WriteAllBytes((Join-Path $OutDir 'client_console.log'), $b[$o..($b.Length - 1)])
+        $slice = $b[$o..($b.Length - 1)]
+        if ($remoteMode -and $remoteIp) {      # the connect line carries the server address; keep it out of saved files
+            $txt = [Text.Encoding]::UTF8.GetString($slice).Replace($remoteIp, 'REMOTE-IP')
+            $slice = [Text.Encoding]::UTF8.GetBytes($txt)
+        }
+        [IO.File]::WriteAllBytes((Join-Path $OutDir 'client_console.log'), $slice)
     }
 }
 if ($skip) { return New-Result 'SKIP' "matrix did not run: $skip" }
 
+$pingSamples = @()
+if ($remoteMode) {
+    # the client's own `status` table: "# userid name uniqueid connected ping loss state rate"
+    $pingSamples = @(Get-Content (Join-Path $OutDir 'client_console.log') | ForEach-Object {
+        if ($_ -match '^#\s+\d+(?:\s+\d+)?\s+"dsc_probe"\s+\S+\s+\S+\s+(\d+)\s+(\d+)') { [int]$Matches[1] } })
+    if (-not $pingSamples.Count) { $problems.Add('no ping sample: the client console log has no status row for dsc_probe') }
+    else { $PingMs = [double]($pingSamples | Measure-Object -Maximum).Maximum }
+}
 $live = Read-Capture (Join-Path $OutDir 'live.csv')
 $srvRows = @(Import-Csv (Join-Path $OutDir 'server.csv'))
 $ready = @($srvRows | Where-Object kind -eq 'ready')
@@ -379,9 +481,16 @@ foreach ($i in $caseIdx) {
 $md = New-Object System.Collections.Generic.List[string]
 $md.Add("# Visual matrix: $build" + $(if ($SelfCheck) { ' (self-check: plugin disabled)' } else { '' }))
 $md.Add('')
-$md.Add("Simulated latency is server net_fakelag. Run $(Get-Date -Format 'yyyy-MM-dd HH:mm'); client clip-counter changes seen in total: $totalClientShots.")
+$latNote = 'Simulated latency is server net_fakelag.'
+if ($remoteMode -and $pingSamples.Count) {
+    $pm = $pingSamples | Measure-Object -Minimum -Maximum -Average
+    $latNote = 'Real ping to the remote server, as reported by the client (status, ' + $pingSamples.Count + ' samples): min ' + $pm.Minimum + ' ms, mean ' + ('{0:F0}' -f $pm.Average) + ' ms, max ' + $pm.Maximum + ' ms; blocked-scope allowance ' + ($PingMs + $RoundTripSlackMs) + ' ms.'
+}
+elseif ($remoteMode) { $latNote = 'Real ping to the remote server (no client ping sample).' }
+$md.Add("$latNote Run $(Get-Date -Format 'yyyy-MM-dd HH:mm'); client clip-counter changes seen in total: $totalClientShots.")
 $md.Add('')
-$md.Add('| Case | ' + (($Lags | ForEach-Object { "$_ ms" }) -join ' | ') + ' |')
+$lagHead = if ($remoteMode) { 'real ping' } else { (($Lags | ForEach-Object { "$_ ms" }) -join ' | ') }
+$md.Add('| Case | ' + $lagHead + ' |')
 $md.Add('| --- | ' + (($Lags | ForEach-Object { '---' }) -join ' | ') + ' |')
 foreach ($i in $caseIdx) {
     $cells = foreach ($lag in $Lags) { $r = $results | Where-Object { $_.Idx -eq $i -and $_.Lag -eq $lag }; if ($r.Pass) { 'pass' } else { 'FAIL' } }

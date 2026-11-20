@@ -3,3 +3,4 @@ bench-results/
 tests/spike/out/
 __pycache__/
 tests/client/out/
+tests/remote/out/

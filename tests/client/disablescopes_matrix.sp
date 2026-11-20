@@ -17,6 +17,12 @@
 	"shot" row with the field of view and ground flag at that moment.
 
 	When the client disconnects after the run the server quits.
+
+	Remote build (spcomp DSC_REMOTE=1, used by Invoke-VisualMatrix.ps1 -Remote against a live server):
+	the server never quits (no timeout timer, no quit on disconnect), sv_cheats and net_fakelag are
+	never touched (dsc_lag only logs its row; the latency is the real one), and the mp_* run cvars are
+	applied when the client arrives, not at plugin load. The version string ends in "-remote" so the
+	runner can tell this build from the local one.
 */
 #pragma semicolon 1
 #pragma newdecls required
@@ -26,6 +32,12 @@
 #include <cstrike>
 
 #define QUIT_AFTER_SEC 1500.0
+
+#if defined DSC_REMOTE
+#define DSC_VERSION "0.1.0-remote"
+#else
+#define DSC_VERSION "0.1.0"
+#endif
 
 char g_csvPath[PLATFORM_MAX_PATH];
 File g_csv = null;
@@ -39,7 +51,7 @@ public Plugin myinfo =
 	name = "disablescopes_matrix",
 	author = "BallGanda",
 	description = "Server side of the DisableScopes visual matrix",
-	version = "0.1.0",
+	version = DSC_VERSION,
 	url = ""
 };
 
@@ -56,12 +68,24 @@ public void OnPluginStart()
 
 public void OnMapStart()
 {
-	ServerCommand("mp_ignore_round_win_conditions 1; mp_autokick 0; mp_freezetime 0; mp_roundtime 9; mp_timelimit 0; mp_limitteams 0; mp_autoteambalance 0; sv_cheats 1");
+#if !defined DSC_REMOTE
+	ApplyRunCvars();
+#endif
 	delete g_csv;
 	g_csv = OpenFile(g_csvPath, "w");
 	g_csv.WriteLine("kind,tick,engine_ms,cmdnum,buttons,onground,fov,weapon,ready2,text");
 	g_csv.Flush();
+#if !defined DSC_REMOTE
 	CreateTimer(QUIT_AFTER_SEC, Timer_Quit, _, TIMER_FLAG_NO_MAPCHANGE);
+#endif
+}
+
+void ApplyRunCvars()
+{
+	ServerCommand("mp_ignore_round_win_conditions 1; mp_autokick 0; mp_freezetime 0; mp_roundtime 9; mp_timelimit 0; mp_limitteams 0; mp_autoteambalance 0");
+#if !defined DSC_REMOTE
+	ServerCommand("sv_cheats 1");
+#endif
 }
 
 public Action Timer_Quit(Handle timer)
@@ -86,10 +110,12 @@ public void OnClientDisconnect(int client)
 	{
 		WriteRow("disconnect", 0, 0, "");
 		g_client = 0;
+#if !defined DSC_REMOTE
 		if (g_ready)
 		{
 			ServerCommand("quit");
 		}
+#endif
 	}
 }
 
@@ -100,6 +126,9 @@ public Action Timer_Place(Handle timer, int userid)
 	{
 		return Plugin_Stop;
 	}
+#if defined DSC_REMOTE
+	ApplyRunCvars();
+#endif
 	ChangeClientTeam(client, CS_TEAM_CT);
 	FakeClientCommand(client, "joinclass 1");
 	CS_RespawnPlayer(client);
@@ -184,10 +213,12 @@ public Action Cmd_Lag(int client, int args)
 		return Plugin_Handled;
 	}
 	int ms = GetCmdArgInt(1);
+#if !defined DSC_REMOTE
 	if (g_cvFakelag != null)
 	{
 		g_cvFakelag.SetInt(ms);
 	}
+#endif
 	char text[16];
 	Format(text, sizeof(text), "%d", ms);
 	WriteRow("lag", 0, 0, text);
