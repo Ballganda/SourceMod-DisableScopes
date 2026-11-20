@@ -7,6 +7,10 @@
 	client count, ticks and seconds in the window, tick rate held, weapons held.
 	Treats the plugin under test as a black box. Inert unless
 	disablescopes_bench_autorun is 1.
+
+	Remote build (spcomp DSB_REMOTE=1, used by Invoke-RemoteBench.ps1 against a live server): the
+	server never quits. The run starts on the server command disablescopes_bench_run (one run at a
+	time), and when it ends the fake clients are kicked. The version string ends in "-remote".
 */
 #pragma semicolon 1
 #pragma newdecls required
@@ -18,6 +22,12 @@
 #define START_DELAY 8.0
 #define SPAWN_STEP 0.15
 #define SETTLE_TIME 6.0
+
+#if defined DSB_REMOTE
+#define DSB_VERSION "0.1.0-remote"
+#else
+#define DSB_VERSION "0.1.0"
+#endif
 
 ConVar g_cvAutorun = null;
 ConVar g_cvClients = null;
@@ -31,6 +41,9 @@ int g_startTick = 0;
 float g_startTime = 0.0;
 int g_users[MAXPLAYERS + 1];
 int g_userCount = 0;
+#if defined DSB_REMOTE
+bool g_running = false;
+#endif
 
 static const char g_restricted[][] =
 {
@@ -42,7 +55,7 @@ public Plugin myinfo =
 	name = "disablescopes_bench",
 	author = "BallGanda",
 	description = "Cost-channel load helper for sm_disablescopes",
-	version = "0.1.0",
+	version = DSB_VERSION,
 	url = ""
 };
 
@@ -54,7 +67,24 @@ public void OnPluginStart()
 	g_cvSeconds = CreateConVar("disablescopes_bench_seconds", "30", "Profiled window in seconds.", FCVAR_NONE, true, 5.0, true, 600.0);
 	g_cvTickrate = CreateConVar("disablescopes_bench_tickrate", "66", "Target tick rate; the run reports whether it was held.", FCVAR_NONE, true, 10.0, true, 200.0);
 	BuildPath(Path_SM, g_logPath, sizeof(g_logPath), "logs/disablescopes_bench.log");
+#if defined DSB_REMOTE
+	RegServerCmd("disablescopes_bench_run", Cmd_Run, "Start one benchmark run with the disablescopes_bench_* cvars.");
+#endif
 }
+
+#if defined DSB_REMOTE
+public Action Cmd_Run(int args)
+{
+	if (g_running)
+	{
+		PrintToServer("disablescopes_bench: a run is already in progress");
+		return Plugin_Handled;
+	}
+	g_running = true;
+	Timer_Begin(null);
+	return Plugin_Handled;
+}
+#endif
 
 public void OnMapStart()
 {
@@ -119,6 +149,8 @@ public Action Timer_Equip(Handle timer)
 		{
 			char item[32];
 			strcopy(item, sizeof(item), g_restricted[i % sizeof(g_restricted)]);
+			// A primary already in the slot (picked up at spawn) makes GivePlayerItem drop the new one.
+			RemovePrimary(client);
 			GivePlayerItem(client, item);
 			FakeClientCommand(client, "use %s", item);
 		}
@@ -129,6 +161,16 @@ public Action Timer_Equip(Handle timer)
 	}
 	CreateTimer(2.0, Timer_Profile, _, TIMER_FLAG_NO_MAPCHANGE);
 	return Plugin_Stop;
+}
+
+void RemovePrimary(int client)
+{
+	int w = GetPlayerWeaponSlot(client, 0);
+	if (w != -1)
+	{
+		RemovePlayerItem(client, w);
+		AcceptEntityInput(w, "Kill");
+	}
 }
 
 int CountAlive()
@@ -178,6 +220,13 @@ public Action Timer_Profile(Handle timer)
 {
 	g_startTick = GetGameTickCount();
 	g_startTime = GetEngineTime();
+#if defined DSB_REMOTE
+	// The vprof totals survive `sm prof stop` (and vprof_reset did not clear them): on a server that keeps
+	// running each report held every earlier window too. Dump the totals before the window; the runner
+	// subtracts this report from the one after it. The markers tell the two reports apart in the console.
+	PrintToServer("DSB_REPORT_BEFORE");
+	ServerCommand("sm prof dump vprof");
+#endif
 	ServerCommand("sm prof start");
 	CreateTimer(g_cvSeconds.FloatValue, Timer_Finish, _, TIMER_FLAG_NO_MAPCHANGE);
 	return Plugin_Stop;
@@ -194,6 +243,9 @@ public Action Timer_Finish(Handle timer)
 	bool held = rate >= g_cvTickrate.FloatValue * 0.98;
 	LogToFileEx(g_logPath, "BENCH clients=%d alive=%d holding=%d scenario=%d ticks=%d seconds=%.2f tickrate=%.2f held=%d",
 		g_userCount, alive, holding, g_cvScenario.IntValue, ticks, secs, rate, held ? 1 : 0);
+#if defined DSB_REMOTE
+	PrintToServer("DSB_REPORT_AFTER");
+#endif
 	ServerCommand("sm prof dump vprof");
 	CreateTimer(3.0, Timer_Quit, _, TIMER_FLAG_NO_MAPCHANGE);
 	return Plugin_Stop;
@@ -202,6 +254,24 @@ public Action Timer_Finish(Handle timer)
 public Action Timer_Quit(Handle timer)
 {
 	LogToFileEx(g_logPath, "=== bench finished ===");
+#if defined DSB_REMOTE
+	for (int i = 0; i < g_userCount; i++)
+	{
+		int client = GetClientOfUserId(g_users[i]);
+		if (client > 0 && IsClientConnected(client))
+		{
+			// Kicked players drop their guns; on a server that keeps running, the next run's fakes picked
+			// them up at spawn and held fewer restricted weapons each run (20, then 18, then 14 of 20).
+			if (IsClientInGame(client) && IsPlayerAlive(client))
+			{
+				RemovePrimary(client);
+			}
+			KickClient(client, "bench done");
+		}
+	}
+	g_running = false;
+#else
 	ServerCommand("quit");
+#endif
 	return Plugin_Stop;
 }

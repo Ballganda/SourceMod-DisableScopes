@@ -21,6 +21,18 @@ public static class ScopeProbe
     [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr a, int x, int y, int cx, int cy, uint f);
     [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
     [DllImport("user32.dll")] static extern uint MapVirtualKey(uint code, uint type);
+    [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
+
+    // Without DPI awareness, on a display scaled to 175% GetClientRect reported 585x438 for the 1024x768
+    // game window and every read (scope edges, ammo HUD) went to the wrong pixels. Physical pixels from here on.
+    static ScopeProbe() { SetProcessDPIAware(); }
+
+    // Client area size in physical pixels, for the runner's check that the window is the size the probe expects.
+    public static string ClientSize(IntPtr hwnd)
+    {
+        RECT r; GetClientRect(hwnd, out r);
+        return (r.R - r.L) + "x" + (r.B - r.T);
+    }
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
 
@@ -40,23 +52,66 @@ public static class ScopeProbe
         SetWindowPos(hwnd, new IntPtr(-1), 0, 0, 0, 0, 0x0001);
     }
 
-    public static void Focus(IntPtr hwnd)
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, IntPtr pid);
+    [DllImport("user32.dll")] static extern bool AttachThreadInput(uint a, uint b, bool attach);
+    [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr h);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr h, System.Text.StringBuilder s, int n);
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+
+    // Title of the window that has the keyboard now, for the runner's error message.
+    public static string ForegroundTitle()
     {
-        keybd_event(0x12, 0, 0, UIntPtr.Zero);          // Alt lets SetForegroundWindow succeed
-        ShowWindow(hwnd, 9);
-        SetForegroundWindow(hwnd);
-        keybd_event(0x12, 0, 2, UIntPtr.Zero);
+        var sb = new System.Text.StringBuilder(256);
+        GetWindowText(GetForegroundWindow(), sb, sb.Capacity);
+        return sb.ToString();
     }
+
+    // Gives the game window the keyboard; true once it is the foreground window. keybd_event goes to whatever
+    // window is in front, so a key sent while another window held the foreground was silently lost (another
+    // test's srcds console or a Steam window on the shared desktop). Retries with the foreground thread's input
+    // attached, which lifts the foreground lock.
+    public static bool Focus(IntPtr hwnd)
+    {
+        for (int i = 0; i < 10; i++)
+        {
+            if (GetForegroundWindow() == hwnd) return true;
+            keybd_event(0x12, 0, 0, UIntPtr.Zero);          // Alt lets SetForegroundWindow succeed
+            ShowWindow(hwnd, 9);
+            uint fg = GetWindowThreadProcessId(GetForegroundWindow(), IntPtr.Zero), me = GetCurrentThreadId();
+            bool attached = fg != 0 && fg != me && AttachThreadInput(me, fg, true);
+            BringWindowToTop(hwnd);
+            SetForegroundWindow(hwnd);
+            if (attached) AttachThreadInput(me, fg, false);
+            keybd_event(0x12, 0, 2, UIntPtr.Zero);
+            Thread.Sleep(50);
+        }
+        return GetForegroundWindow() == hwnd;
+    }
+
+    [DllImport("user32.dll")] static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+    public static int PostedKeys;      // keys sent to the window directly because it could not get the foreground
 
     public static void Key(IntPtr hwnd, byte vk, string label)
     {
-        Focus(hwnd);
-        Thread.Sleep(40);
         byte scan = (byte)MapVirtualKey(vk, 0);
+        if (Focus(hwnd))
+        {
+            Thread.Sleep(40);
+            Mark("key " + label);
+            keybd_event(vk, scan, 0, UIntPtr.Zero);
+            Thread.Sleep(30);
+            keybd_event(vk, scan, 2, UIntPtr.Zero);
+            return;
+        }
+        // Another window holds the foreground and cannot be displaced (a Windows firewall prompt for another
+        // test's srcds did, on the shared desktop). The game reads keys from its window messages, so post them
+        // to the game window itself; the runner still checks that each case reaches the server.
+        PostedKeys++;
         Mark("key " + label);
-        keybd_event(vk, scan, 0, UIntPtr.Zero);
+        PostMessage(hwnd, 0x0100, new IntPtr(vk), new IntPtr(1 | (scan << 16)));                                  // WM_KEYDOWN
         Thread.Sleep(30);
-        keybd_event(vk, scan, 2, UIntPtr.Zero);
+        PostMessage(hwnd, 0x0101, new IntPtr(vk), new IntPtr(unchecked((int)(1u | ((uint)scan << 16) | 0xC0000000u)))); // WM_KEYUP
     }
 
     public static void Mark(string label)
@@ -116,8 +171,10 @@ public static class ScopeProbe
                 Marshal.Copy(new IntPtr(data.Scan0.ToInt64() + (long)y * data.Stride), row, 0, data.Stride);
                 for (int x = 0; x < data.Width; x++)
                 {
-                    int b = row[x * 4], r = row[x * 4 + 2];
-                    bool on = r > 110 && r > 2 * b + 40;
+                    int b = row[x * 4], g = row[x * 4 + 1], r = row[x * 4 + 2];
+                    // orange by hue, not brightness: the digits drew at about (210,144,67) in one run and
+                    // (103,74,27) in another, and the old test (red above 110) saw none of the dim ones
+                    bool on = r >= 60 && r * 10 > g * 12 && g * 10 > b * 18 && r - b > 40;
                     if (on) lit++;
                     hash = (hash ^ (on ? 1UL : 0UL)) * 1099511628211UL;
                 }

@@ -84,7 +84,9 @@ if (($Client -or $Matrix) -and (Get-Process cstrike_win64, cstrike, hl2 -ErrorAc
     exit 2
 }
 if (-not $NoBuild) {
-    & "$PSScriptRoot\build.ps1" -Deploy | Out-Host
+    # deploy into the server under test: without -SourceModDir, build.ps1 deployed to the default cssds even
+    # when -ServerDir named a copy, so the copy ran stale plugins and the shared server was overwritten
+    & "$PSScriptRoot\build.ps1" -Deploy -SourceModDir (Join-Path $game 'addons\sourcemod') | Out-Host
     if ($LASTEXITCODE -ne 0) { Write-Error 'build failed'; exit 2 }
 }
 
