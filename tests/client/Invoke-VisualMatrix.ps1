@@ -67,7 +67,7 @@ if (-not $remoteMode) {
 $clientGame = Join-Path $ClientDir 'cstrike'
 $clientCfgDir = Join-Path $clientGame 'cfg'
 $clientLog = Join-Path $clientGame 'console.log'
-$steam = Join-Path (Split-Path (Split-Path (Split-Path $ClientDir))) 'steam.exe'
+$steam = Join-Path (Split-Path (Split-Path (Split-Path (Split-Path $ClientDir)))) 'steam.exe'   # cstrike -> Counter-Strike Source -> common -> steamapps -> Steam
 $clientNames = 'cstrike_win64', 'cstrike', 'hl2'
 if (-not $remoteMode) {
     $helperSmx = Join-Path $sm 'plugins\disablescopes_matrix.smx'
