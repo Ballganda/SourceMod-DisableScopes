@@ -54,6 +54,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path (Split-Path $PSScriptRoot)
 $remoteMode = ($PSCmdlet.ParameterSetName -eq 'Remote')
+# .NET (Bitmap.Save, the ScopeProbe writers) resolves relative paths against the process directory, not PowerShell's; that made the baseline Save fail with "generic error in GDI+".
+$OutDir = [IO.Path]::GetFullPath([IO.Path]::Combine((Get-Location).ProviderPath, $OutDir))
 if ($remoteMode) {
     $Lags = @(0)    # one pass at the real ping; the lag chain still runs once (its row is logged, nothing is simulated)
     $caseName = "visual matrix: every on-screen case at real ping to $Remote"
@@ -385,14 +387,34 @@ Start-Sleep 1
 Start-Sleep 1
 [ScopeProbe]::Key($hwnd, $VK.NextCase, 'baseline case')
 Start-Sleep 3
+Add-Content (Join-Path $OutDir 'steps.log') 'before snapshot'
+Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+if (-not ('WinState' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class WinState {
+    [StructLayout(LayoutKind.Sequential)] public struct RC { public int L, T, R, B; }
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RC r);
+    [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+}
+'@
+}
+$wr = New-Object WinState+RC
+[void][WinState]::GetWindowRect($hwnd, [ref]$wr)
+Add-Content (Join-Path $OutDir 'steps.log') ("window: iconic=" + [WinState]::IsIconic($hwnd) + " visible=" + [WinState]::IsWindowVisible($hwnd) + " rect=" + "$($wr.L),$($wr.T),$($wr.R),$($wr.B)" + " screen=" + [System.Windows.Forms.Screen]::PrimaryScreen.Bounds + " virtual=" + [System.Windows.Forms.SystemInformation]::VirtualScreen)
 [ScopeProbe]::Snapshot($hwnd, (Join-Path $OutDir 'baseline.png'))
+Add-Content (Join-Path $OutDir 'steps.log') 'after snapshot'
 if ($remoteMode) { [ScopeProbe]::Key($hwnd, $VK.Ping, 'ping before') }
 if (-not (Test-ServerCsv 'case')) { throw 'injected key never reached the server (no case row); see baseline.png' }
 $d = ''
 if ([ScopeProbe]::Classify($hwnd, [ref]$d) -ne 0) { throw "baseline screen classifies as scoped (edges $d); see baseline.png" }
 
 Write-Host 'Running the matrix (leave the game window alone)...'
+Add-Content (Join-Path $OutDir 'steps.log') 'classified ok, starting matrix'
 [ScopeProbe]::Start($hwnd)
+Add-Content (Join-Path $OutDir 'steps.log') 'probe started'
 $firstLag = $true
 foreach ($lag in $Lags) {
     if ($firstLag) { $firstLag = $false } else { [ScopeProbe]::Key($hwnd, $VK.NextLag, "lag $lag") }   # the first latency was applied by the baseline step
@@ -417,6 +439,7 @@ Start-Sleep 1
 }
 catch {
     $skip = "$_"
+    Add-Content (Join-Path $OutDir 'steps.log') ("caught: " + "$_" + " at " + $_.InvocationInfo.ScriptLineNumber)
     try { [ScopeProbe]::Stop((Join-Path $OutDir 'live_partial.csv')) } catch {}
 }
 finally {
