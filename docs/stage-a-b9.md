@@ -1,5 +1,13 @@
 # Stage (a): per-client flag, b9 (ticket #9)
 
+## Current state (regs1)
+
+- Running plugin 0.0.b9 (`sm_disablescopes`), the latest B9 build.
+- Cost on the test copy (32v32, 66 tick): 0.299 µs per client per tick with no restricted weapon held, down from 1.566 µs on Beta 6 (about 81% less); 2.505 µs with all restricted weapons held, down from 3.211 µs (about 22% less).
+- Test helpers removed: `disablescopes_matrix` and `disablescopes_bench` are unloaded and their `.smx` files deleted; the server's logs are kept.
+- Server cvars match the first remote snapshot (`tests/client/out/remote-matrix`), so the server is back in its pre-test state.
+- The visual matrix is parked: matrix-5 and matrix-8 skipped (client never ready), and the uncommitted judge and digit-read changes were reverted to 8935228. The backup is in the session scratchpad as `uncommitted-tooling-backup.patch`.
+
 Plugin 0.0.b9. OnPlayerRunCmd exits on one per-client flag (`g_bHoldsRestricted`) unless the client is alive, in game and holds a restricted weapon with the plugin enabled. The flag is refreshed from weapon switch, equip and drop hooks, player_spawn and player_death, and every cvar change hook; classification runs once per refresh. Cvars are mirrored into bools by change hooks.
 
 Enforcement is split over the two command hooks:
