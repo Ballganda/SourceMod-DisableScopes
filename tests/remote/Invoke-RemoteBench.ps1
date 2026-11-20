@@ -90,7 +90,8 @@ function Invoke-Run([string]$scenario, [int]$perSide, [string]$tag) {
     foreach ($m in [regex]::Matches($line, '(\w+)=([\d.]+)')) { $kv[$m.Groups[1].Value] = [double]$m.Groups[2].Value }
     New-Item -ItemType Directory -Force $OutDir | Out-Null
     $report | Set-Content (Join-Path $OutDir "vprof-$tag.txt") -Encoding utf8
-    $cost = Get-PluginCost $report 'disablescopes'
+    # The server runs the plugin as sm_disablescopes.smx (the deployed name), not disablescopes.smx.
+    $cost = Get-PluginCost $report 'sm_disablescopes'
     if (-not $cost -or $cost.Calls -eq 0) { throw 'the plugin does not appear in the vprof report' }
     $clientTicks = $kv['clients'] * $kv['ticks']
     $expectHold = if ($sc -eq 1) { $kv['clients'] } else { 0 }

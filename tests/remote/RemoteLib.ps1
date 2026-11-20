@@ -75,7 +75,7 @@ function Clear-ConsoleLine([string]$l) {
 }
 function Get-RemoteLineCount([string]$relPath) {
     Test-RemotePath $relPath
-    $o = Invoke-RemoteBash "cd ~ && (wc -l < '$relPath' 2>/dev/null || echo 0)"
+    $o = Invoke-RemoteBash "cd ~ && if [ -f '$relPath' ]; then wc -l < '$relPath'; else echo 0; fi"
     return [int]($o.Trim() -replace '\D', '')
 }
 # Lines after line number $after (0 = whole file); returns a string[] with console decoration removed.
