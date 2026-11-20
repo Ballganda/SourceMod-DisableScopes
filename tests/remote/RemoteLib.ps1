@@ -50,9 +50,10 @@ function Protect-Text([string]$text) {
 
 # Run a bash script on the server over ssh (script on stdin). Returns the redacted output as one string.
 function Invoke-RemoteBash([string]$bash, [switch]$AllowFail) {
-    $OutputEncoding = New-Object Text.UTF8Encoding $false
+    # Sent as base64 in the command, not on stdin: Windows PowerShell 5.1 prepends a UTF-8 BOM to native stdin, and bash then fails on "\xEF\xBB\xBFcd".
     $body = ($bash -replace "`r", '') + "`n"
-    $out = $body | & $script:Ssh -o BatchMode=yes -o ConnectTimeout=15 $script:RemoteHost 'bash -s'
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($body))
+    $out = & $script:Ssh -o BatchMode=yes -o ConnectTimeout=15 $script:RemoteHost "echo $b64 | base64 -d | bash"
     $code = $LASTEXITCODE
     if ($code -ne 0 -and -not $AllowFail) {
         throw ("ssh $($script:RemoteHost) failed (exit $code). If it says permission denied or no identities, the user must re-add the key with ssh-add; never supply a passphrase. " + (Protect-Text ($out -join "`n")))
