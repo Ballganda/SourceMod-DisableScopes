@@ -127,7 +127,7 @@ try {
     $hwnd = $cli.MainWindowHandle
     [ScopeProbe]::Place($hwnd)
     Start-Sleep 3
-    [ScopeProbe]::Focus($hwnd)
+    [void][ScopeProbe]::Focus($hwnd)
     Start-Sleep 1
     [ScopeProbe]::Key($hwnd, 0x72, 'reset')          # F3: fresh AWP, view set, unscoped
     Start-Sleep 2

@@ -223,7 +223,7 @@ Remove-Item $serverCsv -ErrorAction SilentlyContinue
     $hwnd = $cli.MainWindowHandle
     [ScopeProbe]::Place($hwnd)
     Start-Sleep 3
-    [ScopeProbe]::Focus($hwnd)
+    [void][ScopeProbe]::Focus($hwnd)
     Start-Sleep 1
     [ScopeProbe]::Key($hwnd, $VK.Reset, 'reset')
     Start-Sleep 2

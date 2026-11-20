@@ -149,6 +149,8 @@ public Action Timer_Equip(Handle timer)
 		{
 			char item[32];
 			strcopy(item, sizeof(item), g_restricted[i % sizeof(g_restricted)]);
+			// A primary already in the slot (picked up at spawn) makes GivePlayerItem drop the new one.
+			RemovePrimary(client);
 			GivePlayerItem(client, item);
 			FakeClientCommand(client, "use %s", item);
 		}
@@ -159,6 +161,16 @@ public Action Timer_Equip(Handle timer)
 	}
 	CreateTimer(2.0, Timer_Profile, _, TIMER_FLAG_NO_MAPCHANGE);
 	return Plugin_Stop;
+}
+
+void RemovePrimary(int client)
+{
+	int w = GetPlayerWeaponSlot(client, 0);
+	if (w != -1)
+	{
+		RemovePlayerItem(client, w);
+		AcceptEntityInput(w, "Kill");
+	}
 }
 
 int CountAlive()
@@ -208,6 +220,13 @@ public Action Timer_Profile(Handle timer)
 {
 	g_startTick = GetGameTickCount();
 	g_startTime = GetEngineTime();
+#if defined DSB_REMOTE
+	// The vprof totals survive `sm prof stop` (and vprof_reset did not clear them): on a server that keeps
+	// running each report held every earlier window too. Dump the totals before the window; the runner
+	// subtracts this report from the one after it. The markers tell the two reports apart in the console.
+	PrintToServer("DSB_REPORT_BEFORE");
+	ServerCommand("sm prof dump vprof");
+#endif
 	ServerCommand("sm prof start");
 	CreateTimer(g_cvSeconds.FloatValue, Timer_Finish, _, TIMER_FLAG_NO_MAPCHANGE);
 	return Plugin_Stop;
@@ -224,6 +243,9 @@ public Action Timer_Finish(Handle timer)
 	bool held = rate >= g_cvTickrate.FloatValue * 0.98;
 	LogToFileEx(g_logPath, "BENCH clients=%d alive=%d holding=%d scenario=%d ticks=%d seconds=%.2f tickrate=%.2f held=%d",
 		g_userCount, alive, holding, g_cvScenario.IntValue, ticks, secs, rate, held ? 1 : 0);
+#if defined DSB_REMOTE
+	PrintToServer("DSB_REPORT_AFTER");
+#endif
 	ServerCommand("sm prof dump vprof");
 	CreateTimer(3.0, Timer_Quit, _, TIMER_FLAG_NO_MAPCHANGE);
 	return Plugin_Stop;
@@ -238,6 +260,12 @@ public Action Timer_Quit(Handle timer)
 		int client = GetClientOfUserId(g_users[i]);
 		if (client > 0 && IsClientConnected(client))
 		{
+			// Kicked players drop their guns; on a server that keeps running, the next run's fakes picked
+			// them up at spawn and held fewer restricted weapons each run (20, then 18, then 14 of 20).
+			if (IsClientInGame(client) && IsPlayerAlive(client))
+			{
+				RemovePrimary(client);
+			}
 			KickClient(client, "bench done");
 		}
 	}

@@ -43,6 +43,8 @@ char g_csvPath[PLATFORM_MAX_PATH];
 File g_csv = null;
 int g_client = 0;
 bool g_ready = false;
+int g_armTries = 0;
+float g_view[3] = {-40.0, 90.0, 0.0};      // looking up at the sky on de_dust2: a plain, bright background
 ConVar g_cvSelfCheck = null;
 ConVar g_cvFakelag = null;
 
@@ -62,6 +64,7 @@ public void OnPluginStart()
 	g_cvFakelag = FindConVar("net_fakelag");
 	RegConsoleCmd("dsc_mark", Cmd_Mark, "dsc_mark <label>: write a marker row");
 	RegConsoleCmd("dsc_lag", Cmd_Lag, "dsc_lag <ms>: set the simulated latency");
+	RegConsoleCmd("dsc_view", Cmd_View, "dsc_view <pitch> <yaw>: the view every case starts from (the runner picks one whose screen edges are bright)");
 	RegConsoleCmd("dsc_case", Cmd_Case, "dsc_case <idx> <weapon> <awp> <scout> <auto> <weak> <inair> <onground>");
 	HookEvent("weapon_fire", Event_WeaponFire);
 }
@@ -72,8 +75,19 @@ public void OnMapStart()
 	ApplyRunCvars();
 #endif
 	delete g_csv;
+#if defined DSC_REMOTE
+	// Append: the live server changes map on its own, and truncating here cut the rows the runner had
+	// already counted (it reads only the lines after its starting line count).
+	bool fresh = !FileExists(g_csvPath) || FileSize(g_csvPath) == 0;
+	g_csv = OpenFile(g_csvPath, "a");
+	if (fresh)
+	{
+		g_csv.WriteLine("kind,tick,engine_ms,cmdnum,buttons,onground,fov,weapon,ready2,text");
+	}
+#else
 	g_csv = OpenFile(g_csvPath, "w");
 	g_csv.WriteLine("kind,tick,engine_ms,cmdnum,buttons,onground,fov,weapon,ready2,text");
+#endif
 	g_csv.Flush();
 #if !defined DSC_REMOTE
 	CreateTimer(QUIT_AFTER_SEC, Timer_Quit, _, TIMER_FLAG_NO_MAPCHANGE);
@@ -83,7 +97,11 @@ public void OnMapStart()
 void ApplyRunCvars()
 {
 	ServerCommand("mp_ignore_round_win_conditions 1; mp_autokick 0; mp_freezetime 0; mp_roundtime 9; mp_timelimit 0; mp_limitteams 0; mp_autoteambalance 0");
-#if !defined DSC_REMOTE
+#if defined DSC_REMOTE
+	// The live server keeps bots in play; they killed the probe client before it was armed (no ready row)
+	// or during a case (no scope, no shot). The runner restores bot_quota from its snapshot afterwards.
+	ServerCommand("bot_quota 0");
+#else
 	ServerCommand("sv_cheats 1");
 #endif
 }
@@ -110,7 +128,9 @@ public void OnClientDisconnect(int client)
 	{
 		WriteRow("disconnect", 0, 0, "");
 		g_client = 0;
-#if !defined DSC_REMOTE
+#if defined DSC_REMOTE
+		g_ready = false;        // the next run's client must log its own ready row
+#else
 		if (g_ready)
 		{
 			ServerCommand("quit");
@@ -133,6 +153,7 @@ public Action Timer_Place(Handle timer, int userid)
 	FakeClientCommand(client, "joinclass 1");
 	CS_RespawnPlayer(client);
 	HidePanels(client);
+	g_armTries = 0;
 	CreateTimer(1.0, Timer_Arm, userid, TIMER_FLAG_NO_MAPCHANGE);
 	return Plugin_Stop;
 }
@@ -140,8 +161,23 @@ public Action Timer_Place(Handle timer, int userid)
 public Action Timer_Arm(Handle timer, int userid)
 {
 	int client = GetClientOfUserId(userid);
-	if (client == 0 || !IsPlayerAlive(client))
+	if (client == 0)
 	{
+		return Plugin_Stop;
+	}
+	if (GetClientTeam(client) != CS_TEAM_CT || !IsPlayerAlive(client))
+	{
+		// Not placed yet (still loading, or killed before arming): place again instead of never logging ready.
+		if (++g_armTries <= 20)
+		{
+			ChangeClientTeam(client, CS_TEAM_CT);
+			CS_RespawnPlayer(client);
+			CreateTimer(1.0, Timer_Arm, userid, TIMER_FLAG_NO_MAPCHANGE);
+		}
+		else
+		{
+			WriteRow("arm_failed", 0, 0, "");
+		}
 		return Plugin_Stop;
 	}
 	HidePanels(client);
@@ -191,9 +227,8 @@ void Arm(int client, const char[] weaponName)
 	{
 		EquipPlayerWeapon(client, gun);
 	}
-	float ang[3] = {-40.0, 90.0, 0.0};      // looking up at the sky: a plain, bright background
 	float zero[3] = {0.0, 0.0, 0.0};
-	TeleportEntity(client, NULL_VECTOR, ang, zero);
+	TeleportEntity(client, NULL_VECTOR, g_view, zero);
 	SetEntProp(client, Prop_Send, "m_iFOV", 0);
 }
 
@@ -203,6 +238,22 @@ public Action Cmd_Mark(int client, int args)
 	GetCmdArgString(text, sizeof(text));
 	ReplaceString(text, sizeof(text), ",", ";");
 	WriteRow("mark", 0, 0, text);
+	return Plugin_Handled;
+}
+
+public Action Cmd_View(int client, int args)
+{
+	if (client != g_client || args < 2 || !IsClientInGame(client) || !IsPlayerAlive(client))
+	{
+		return Plugin_Handled;
+	}
+	g_view[0] = GetCmdArgFloat(1);
+	g_view[1] = GetCmdArgFloat(2);
+	float zero[3] = {0.0, 0.0, 0.0};
+	TeleportEntity(client, NULL_VECTOR, g_view, zero);
+	char text[32];
+	Format(text, sizeof(text), "%.0f %.0f", g_view[0], g_view[1]);
+	WriteRow("view", 0, 0, text);
 	return Plugin_Handled;
 }
 

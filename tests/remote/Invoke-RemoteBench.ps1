@@ -1,4 +1,4 @@
-<#
+﻿<#
 Remote cost channel: microseconds per client per tick of the plugin loaded on the remote server (issue #10),
 with the same table as bench.ps1 so it can be compared with docs/stage-a-b9.md.
 
@@ -59,11 +59,35 @@ function Get-PluginCost([string[]]$report, [string]$plugin) {
     return $r
 }
 
+# The first complete vprof report after the line $marker (and before $stop, when given), or $null.
+function Get-ReportAfterMarker([string[]]$con, [string]$marker, [string]$stop) {
+    $m = -1
+    for ($i = $con.Count - 1; $i -ge 0; $i--) { if ($con[$i] -match "^$marker\b") { $m = $i; break } }
+    if ($m -lt 0) { return $null }
+    $b = -1
+    for ($i = $m + 1; $i -lt $con.Count; $i++) {
+        if ($stop -and $con[$i] -match "^$stop\b") { return $null }
+        if ($b -lt 0 -and $con[$i] -match 'BEGIN VPROF REPORT') { $b = $i }
+        if ($b -ge 0 -and $con[$i] -match 'END VPROF REPORT') { return $con[$b..$i] }
+    }
+    return $null
+}
+
+# Host CPU counters (/proc/stat, first line): steal is time the hypervisor gave to other guests. vprof times are
+# wall-clock, so a window with steal reads slower than the code ran; it is recorded beside every run.
+function Get-RemoteCpuTicks {
+    $f = @((Invoke-RemoteBash 'head -n 1 /proc/stat').Trim() -split '\s+')
+    $n = @($f[1..($f.Count - 1)] | ForEach-Object { [double]$_ })
+    $total = 0.0; foreach ($x in $n[0..7]) { $total += $x }
+    return [pscustomobject]@{ Total = $total; Steal = $n[7] }
+}
+
 function Invoke-Run([string]$scenario, [int]$perSide, [string]$tag) {
     $clients = $perSide * 2
     $sc = if ($scenario -eq 'restricted') { 1 } else { 0 }
     $nBench = Get-RemoteLineCount $benchLogRel
     $nCon = Get-RemoteLineCount $script:RemoteConsoleLog
+    $cpu0 = Get-RemoteCpuTicks
     [void](Send-RemoteCommands @(
         "disablescopes_bench_clients $clients", "disablescopes_bench_scenario $sc", "disablescopes_bench_seconds $Seconds",
         "disablescopes_bench_tickrate $Tickrate", 'disablescopes_bench_run') -GapSec 0.4 -WaitSec 0.5)
@@ -75,24 +99,37 @@ function Invoke-Run([string]$scenario, [int]$perSide, [string]$tag) {
             $line = @(Get-RemoteLines $benchLogRel $nBench | Where-Object { $_ -match 'BENCH clients=' }) | Select-Object -Last 1
         }
         if ($line) {
+            # The vprof totals are cumulative on a server that keeps running: the helper dumps them before the
+            # window (after DSB_REPORT_BEFORE) and after it (after DSB_REPORT_AFTER); the run's cost is the difference.
             $con = @(Get-RemoteLines $script:RemoteConsoleLog $nCon)
-            $b = -1; $e = -1
-            for ($i = 0; $i -lt $con.Count; $i++) {
-                if ($b -lt 0 -and $con[$i] -match 'BEGIN VPROF REPORT') { $b = $i }
-                if ($con[$i] -match 'END VPROF REPORT') { $e = $i }
-            }
-            if ($b -ge 0 -and $e -gt $b) { $report = $con[$b..$e]; break }
+            $before = Get-ReportAfterMarker $con 'DSB_REPORT_BEFORE' 'DSB_REPORT_AFTER'
+            $report = Get-ReportAfterMarker $con 'DSB_REPORT_AFTER' ''
+            if ($report) { break }
         }
     }
+    $cpu1 = Get-RemoteCpuTicks
     if (-not $line) { throw 'no BENCH line in the helper log (helper not loaded, run did not start, or it died before the window ended)' }
-    if (-not $report) { throw 'no complete vprof report in the server console log' }
+    if (-not $report) { throw 'no complete vprof report after DSB_REPORT_AFTER in the server console log (helper older than this script?)' }
     $kv = @{}
     foreach ($m in [regex]::Matches($line, '(\w+)=([\d.]+)')) { $kv[$m.Groups[1].Value] = [double]$m.Groups[2].Value }
     New-Item -ItemType Directory -Force $OutDir | Out-Null
     $report | Set-Content (Join-Path $OutDir "vprof-$tag.txt") -Encoding utf8
+    if ($before) { $before | Set-Content (Join-Path $OutDir "vprof-$tag-before.txt") -Encoding utf8 }
     # The server runs the plugin as sm_disablescopes.smx (the deployed name), not disablescopes.smx.
-    $cost = Get-PluginCost $report 'sm_disablescopes'
-    if (-not $cost -or $cost.Calls -eq 0) { throw 'the plugin does not appear in the vprof report' }
+    $after = Get-PluginCost $report 'sm_disablescopes'
+    if (-not $after -or $after.Calls -eq 0) { throw 'the plugin does not appear in the vprof report' }
+    $base = $null
+    if ($before) { $base = Get-PluginCost $before 'sm_disablescopes' }
+    if (-not $base) { $base = [pscustomobject]@{ TotalMs = 0.0; Calls = 0L; PeakMs = 0.0 } }
+    # the peak is a running maximum too: a peak no higher than before the window was not set in it (reported as 0)
+    $cost = [pscustomobject]@{
+        TotalMs = $after.TotalMs - $base.TotalMs; Calls = $after.Calls - $base.Calls
+        PeakMs = $(if ($after.PeakMs -gt $base.PeakMs) { $after.PeakMs } else { 0.0 })
+    }
+    if ($cost.Calls -le 0) { throw "the plugin made no calls in the window (calls before $($base.Calls), after $($after.Calls))" }
+    # sanity: one OnPlayerRunCmd and one OnPlayerRunCmdPost per client per tick, within 15%
+    $expectCalls = 2.0 * $kv['clients'] * $kv['ticks']
+    if ([math]::Abs($cost.Calls - $expectCalls) -gt 0.15 * $expectCalls) { throw "the window's plugin call count $($cost.Calls) does not match 2 x clients x ticks ($expectCalls): the reports do not bound the window" }
     $clientTicks = $kv['clients'] * $kv['ticks']
     $expectHold = if ($sc -eq 1) { $kv['clients'] } else { 0 }
     Start-Sleep 5   # the helper kicks its bots 3 s after the dump
@@ -102,6 +139,7 @@ function Invoke-Run([string]$scenario, [int]$perSide, [string]$tag) {
         Holding = [int]$kv['holding']; Alive = [int]$kv['alive']
         UsPerClientTick = $cost.TotalMs * 1000.0 / $clientTicks
         PeakMs = $cost.PeakMs; Calls = $cost.Calls; TotalMs = $cost.TotalMs
+        StealPct = $(if ($cpu1.Total -gt $cpu0.Total) { 100.0 * ($cpu1.Steal - $cpu0.Steal) / ($cpu1.Total - $cpu0.Total) } else { 0.0 })
     }
 }
 
@@ -112,7 +150,7 @@ function Measure-Cell([string]$build, [string]$scenario, [int]$perSide) {
         Write-Host "  run $i/$Runs $tag ..." -NoNewline
         $r = Invoke-Run $scenario $perSide $tag
         $note = if ($r.WeaponsOk) { '' } else { "  [WEAPONS: holding $($r.Holding)/$($r.Clients), alive $($r.Alive)]" }
-        Write-Host (' {0:N3} us/client/tick, peak {1:N2} ms, tickrate {2:N2}{3}' -f $r.UsPerClientTick, $r.PeakMs, $r.Tickrate, $note)
+        Write-Host (' {0:N3} us/client/tick, peak {1:N2} ms, tickrate {2:N2}, cpu steal {4:N1}%{3}' -f $r.UsPerClientTick, $r.PeakMs, $r.Tickrate, $note, $r.StealPct)
         $rs += $r
     }
     $v = @($rs | ForEach-Object { $_.UsPerClientTick })
@@ -127,6 +165,8 @@ function Measure-Cell([string]$build, [string]$scenario, [int]$perSide) {
         Held = ((($rs | Measure-Object Tickrate -Average).Average) -ge 0.98 * $Tickrate)
         Tickrate = ($rs | Measure-Object Tickrate -Average).Average
         WeaponsOk = (@($rs | Where-Object { -not $_.WeaponsOk }).Count -eq 0)
+        Min = ($v | Measure-Object -Minimum).Minimum
+        Runs = (($rs | ForEach-Object { '{0:N3} ({1:N0}% steal)' -f $_.UsPerClientTick, $_.StealPct }) -join ', ')
     }
 }
 
@@ -177,6 +217,8 @@ foreach ($c in $allCells) {
     $held = if ($c.Held) { 'yes' } else { 'no' }
     $lines += ('| {0} | {1} | {2}v{2} | {3:N3} | {9:N3} us ({4:N1}%){5} | {6:N2} | {7:N2} | {8} |' -f $c.Build, $c.Scenario, $c.PerSide, $c.Us, $c.SpreadPct, $over, $c.PeakMs, $c.Tickrate, $held, $c.SpreadUs)
 }
+$lines += ''
+foreach ($c in $allCells) { $lines += "Runs, $($c.Scenario): $($c.Runs); lowest $('{0:N3}' -f $c.Min) us." }
 $lines += ''
 foreach ($g in ($allCells | Group-Object { "$($_.Build)/$($_.Scenario)" })) {
     $top = @($g.Group | Where-Object { $_.Held }) | Select-Object -Last 1
