@@ -241,8 +241,16 @@ public Action Timer_Finish(Handle timer)
 	int alive = CountAlive();
 	int holding = CountHoldingRestricted();
 	bool held = rate >= g_cvTickrate.FloatValue * 0.98;
-	LogToFileEx(g_logPath, "BENCH clients=%d alive=%d holding=%d scenario=%d ticks=%d seconds=%.2f tickrate=%.2f held=%d",
-		g_userCount, alive, holding, g_cvScenario.IntValue, ticks, secs, rate, held ? 1 : 0);
+	// plugin=1: the plugin under test was running, so its absence from the profile means it made no calls.
+#if defined DSB_REMOTE
+	// the live server runs the plugin under its deployed name
+	Handle plugin = FindPluginByFile("sm_disablescopes.smx");
+#else
+	Handle plugin = FindPluginByFile("disablescopes.smx");
+#endif
+	bool running = plugin != null && GetPluginStatus(plugin) == Plugin_Running;
+	LogToFileEx(g_logPath, "BENCH clients=%d alive=%d holding=%d scenario=%d ticks=%d seconds=%.2f tickrate=%.2f held=%d plugin=%d",
+		g_userCount, alive, holding, g_cvScenario.IntValue, ticks, secs, rate, held ? 1 : 0, running ? 1 : 0);
 #if defined DSB_REMOTE
 	PrintToServer("DSB_REPORT_AFTER");
 #endif
