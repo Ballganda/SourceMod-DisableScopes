@@ -2,7 +2,7 @@
 #   .\bench.ps1 -Build b8 -Scenario restricted -PerSide 20          one cell, -Runs repeats, mean and spread
 #   .\bench.ps1 -Build b8 -Scenario none -Ladder                    10v10, 20v20, 32v32; stops at the first count that misses tickrate
 #   .\bench.ps1 -Baseline                                           Beta 6 and b8, both scenarios, full ladder; writes the table
-# Builds: beta6 = the 0.0.b6 source on main, b8 = commit f6d309f, current = scripting\disablescopes.sp in this tree.
+# Builds: beta6 = commit f2fcaeb, b8 = commit f6d309f, b9 = commit 162c83a, current = scripting\disablescopes.sp in this tree.
 # Runs on a private copy of the server (default C:\Users\user\cssds_bench, made with robocopy from cssds) on its own
 # port, so it never touches the shared server that test.ps1 uses or collides with another run.
 # Exit 0 = every cell finished and repeat runs agreed within -MarginUs; 1 = a run failed or disagreed; 2 = could not start.
@@ -12,7 +12,7 @@
 # total time by clients x ticks in the window. Both rules (in air, on ground) are on, so every client takes the
 # plugin's full path; "none" holds knives, "restricted" holds the six restricted weapons in rotation.
 param(
-    [ValidateSet('beta6', 'b8', 'current')][string]$Build = 'current',
+    [ValidateSet('beta6', 'b8', 'b9', 'current')][string]$Build = 'current',
     [ValidateSet('none', 'restricted')][string]$Scenario = 'none',
     [int]$PerSide = 10,
     [switch]$Ladder,
@@ -35,7 +35,7 @@ $plugins = Join-Path $SourceModDir 'plugins'
 $spcomp = Join-Path $SourceModDir 'scripting\spcomp.exe'
 $stage = Join-Path ([IO.Path]::GetTempPath()) 'disablescopes_bench'
 $ladderSteps = @(10, 20, 32)
-$gitRefs = @{ beta6 = 'main'; b8 = 'f6d309f' }
+$gitRefs = @{ beta6 = 'f2fcaeb'; b8 = 'f6d309f'; b9 = '162c83a' }
 
 function Get-NewText([string]$path, [long]$from) {
     if (-not (Test-Path $path)) { return '' }

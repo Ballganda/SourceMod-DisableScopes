@@ -8,7 +8,7 @@
 #define NAME "[CS:S]sm_disablescopes"
 #define AUTHOR "BallGanda"
 #define DESCRIPTION "sm_disablescopes of selected weapons & limit air or ground use"
-#define PLUGIN_VERSION "0.0.b9"
+#define PLUGIN_VERSION "0.0.b11"
 #define URL "https://github.com/Ballganda/SourceMod-DisableScopes"
 #define DS_PREFIX "[DisableScopes]"
 
@@ -52,6 +52,14 @@ bool g_bRestrictScout = true;
 bool g_bRestrictAuto = true;
 bool g_bRestrictWeak = true;
 
+// Send-prop offsets looked up once at load, so the per-command path reads and writes by offset
+// instead of hashing a property name on every call.
+int g_offFlags = -1;
+int g_offActiveWeapon = -1;
+int g_offFOV = -1;
+int g_offDefaultFOV = -1;
+int g_offNextSecondaryAttack = -1;
+
 bool g_bEntPropsCached = false;
 bool g_bHasZoomLevel = false;
 bool g_bHasResumeZoom = false;
@@ -59,6 +67,7 @@ bool g_bHasResumeZoom = false;
 public void OnPluginStart()
 {
     CheckGameVersion();
+    FindOffsets();
 
     RegAdminCmd("sm_disablescopes", smAbout, ADMFLAG_BAN, "sm_disablescopes info in console");
 
@@ -222,14 +231,17 @@ void ReleaseHold(int client)
     if (weapon <= 0)
         return;
 
-    if (GetEntPropFloat(weapon, Prop_Send, "m_flNextSecondaryAttack") == g_fWrittenNSA[client])
-        SetEntPropFloat(weapon, Prop_Send, "m_flNextSecondaryAttack", g_fRestoreNSA[client]);
+    if (GetEntDataFloat(weapon, g_offNextSecondaryAttack) == g_fWrittenNSA[client])
+        SetEntDataFloat(weapon, g_offNextSecondaryAttack, g_fRestoreNSA[client], true);
 }
 
 // Keep the next-secondary-attack time at least NSA_REFRESH ahead; write only when it falls short.
-void HoldSecondaryAttack(int client, int activeWeapon)
+// Returns true when the hold was already in place and the game has not touched the timer since:
+// the weapon could not zoom in that window, so the caller can skip the unscope check.
+bool HoldSecondaryAttack(int client, int activeWeapon)
 {
-    float nsa = GetEntPropFloat(activeWeapon, Prop_Send, "m_flNextSecondaryAttack");
+    float nsa = GetEntDataFloat(activeWeapon, g_offNextSecondaryAttack);
+    bool steady = g_bBlocking[client] && nsa == g_fWrittenNSA[client];
 
     if (!g_bBlocking[client])
     {
@@ -247,9 +259,10 @@ void HoldSecondaryAttack(int client, int activeWeapon)
     if (nsa < now + NSA_REFRESH)
     {
         nsa = now + NSA_HOLD;
-        SetEntPropFloat(activeWeapon, Prop_Send, "m_flNextSecondaryAttack", nsa);
+        SetEntDataFloat(activeWeapon, g_offNextSecondaryAttack, nsa, true);
     }
     g_fWrittenNSA[client] = nsa;
+    return steady;
 }
 
 void GeneratePerInstanceConfig(const char[] cfgName, const char[][] defaultLines, int lineCount)
@@ -364,7 +377,7 @@ bool IsNoScopeWeapon(int entityNumber)
 
 bool ShouldBlockScope(int client)
 {
-    if ((GetEntityFlags(client) & FL_ONGROUND) != 0)
+    if ((GetEntData(client, g_offFlags) & FL_ONGROUND) != 0)
         return g_bBlockOnGround;
 
     return g_bBlockInAir;
@@ -383,8 +396,8 @@ void CacheEntPropAvailability(int client, int activeWeapon)
 void ForceUnscope(int client, int activeWeapon)
 {
     // m_iFOV is 0 (b8 build) or the default view (b6 build) when not scoped.
-    int fov = GetEntProp(client, Prop_Send, "m_iFOV");
-    if (fov == 0 || fov == GetEntProp(client, Prop_Send, "m_iDefaultFOV"))
+    int fov = GetEntData(client, g_offFOV);
+    if (fov == 0 || fov == GetEntData(client, g_offDefaultFOV))
         return;
 
     CacheEntPropAvailability(client, activeWeapon);
@@ -441,12 +454,29 @@ public void OnPlayerRunCmdPost(int client, int buttons, int impulse, const float
         return;
     }
 
-    int activeWeapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
+    int activeWeapon = GetEntDataEnt2(client, g_offActiveWeapon);
     if (activeWeapon <= 0)
         return;
 
-    HoldSecondaryAttack(client, activeWeapon);
-    ForceUnscope(client, activeWeapon);
+    if (!HoldSecondaryAttack(client, activeWeapon))
+        ForceUnscope(client, activeWeapon);
+}
+
+int FindOffsetOrFail(const char[] cls, const char[] prop)
+{
+    int off = FindSendPropInfo(cls, prop);
+    if (off <= 0)
+        SetFailState("Send prop %s::%s not found", cls, prop);
+    return off;
+}
+
+void FindOffsets()
+{
+    g_offFlags = FindOffsetOrFail("CBasePlayer", "m_fFlags");
+    g_offActiveWeapon = FindOffsetOrFail("CBasePlayer", "m_hActiveWeapon");
+    g_offFOV = FindOffsetOrFail("CBasePlayer", "m_iFOV");
+    g_offDefaultFOV = FindOffsetOrFail("CBasePlayer", "m_iDefaultFOV");
+    g_offNextSecondaryAttack = FindOffsetOrFail("CBaseCombatWeapon", "m_flNextSecondaryAttack");
 }
 
 void CheckGameVersion()
