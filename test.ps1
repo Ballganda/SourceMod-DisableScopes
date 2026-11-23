@@ -163,8 +163,4 @@ if ($problems.Count) {
     exit 1
 }
 Write-Host "`nRESULT: PASS" -ForegroundColor Green
-exit 0#   .	est.ps1 -Matrix        also run the visual matrix: every on-screen case at simulated 0, 50, 150 and
-#                              250 ms with the real client (about 10 min; leave the desktop alone).
-#                              -MatrixRef <git ref> measures another build (e.g. v0.0.b6-beta) instead of the
-#                              working tree; -ClientSelfCheck makes the matrix run with the plugin disabled.
-
+exit 0
