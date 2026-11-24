@@ -17,7 +17,7 @@
 #include <sdktools>
 #include <cstrike>
 
-#define PLUGIN_FILE "disablescopes.smx"
+#define PLUGIN_FILE "sm_disablescopes.smx"
 #define START_DELAY 10.0
 #define STEP 0.25
 #define INIT_MAX_TRIES 80
@@ -556,12 +556,12 @@ bool Execute(int op, int arg, int arg2)
 	{
 		case OP_SETUP:
 		{
-			ServerCommand("sm plugins unload disablescopes");
+			ServerCommand("sm plugins unload sm_disablescopes");
 			return true;
 		}
 		case OP_LOAD:
 		{
-			ServerCommand("sm plugins load disablescopes");
+			ServerCommand("sm plugins load sm_disablescopes");
 			ServerCommand("mp_freezetime 0; mp_ignore_round_win_conditions 1; mp_autoteambalance 0; mp_limitteams 0; bot_quota 0; mp_restartgame 1");
 			return true;
 		}

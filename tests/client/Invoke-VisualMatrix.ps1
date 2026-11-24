@@ -75,7 +75,7 @@ $steam = Join-Path (Split-Path (Split-Path (Split-Path $ClientDir))) 'steam.exe'
 $clientNames = 'cstrike_win64', 'cstrike', 'hl2'
 if (-not $remoteMode) {
     $helperSmx = Join-Path $sm 'plugins\disablescopes_matrix.smx'
-    $pluginSmx = Join-Path $sm 'plugins\disablescopes.smx'
+    $pluginSmx = Join-Path $sm 'plugins\sm_disablescopes.smx'
     $serverCsv = Join-Path $sm 'logs\disablescopes_matrix.csv'
 }
 $PingMs = 0.0             # remote: the worst ping the client reported; added to the blocked-scope allowance
@@ -367,11 +367,11 @@ if (-not $remoteMode) {
     if ($LASTEXITCODE -ne 0) { return New-Result 'SKIP' 'disablescopes_matrix.sp failed to compile' }
 }
 if ($Ref) {
-    $src = Join-Path $OutDir 'disablescopes.sp'
+    $src = Join-Path $OutDir 'sm_disablescopes.sp'
     # the tag for Beta 6 predates the scripting/ folder
     $bytes = $null
     $ErrorActionPreference = 'Continue'     # git writes to stderr for a path that is not in the ref
-    foreach ($path in 'scripting/disablescopes.sp', 'sm_disablescopes.sp') {
+    foreach ($path in 'scripting/sm_disablescopes.sp', 'scripting/disablescopes.sp', 'sm_disablescopes.sp') {
         $bytes = & git -C $repo show "${Ref}:$path" 2>$null
         if ($LASTEXITCODE -eq 0) { break }
     }

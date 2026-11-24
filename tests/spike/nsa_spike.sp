@@ -64,7 +64,7 @@ public void OnMapStart()
 public Action Timer_Begin(Handle timer)
 {
 	LogToFileEx(g_logPath, "=== nsa spike started ===");
-	ServerCommand("sm plugins unload disablescopes");
+	ServerCommand("sm plugins unload sm_disablescopes");
 	ServerCommand("mp_freezetime 0; mp_ignore_round_win_conditions 1; bot_quota 0; mp_limitteams 0; mp_autoteambalance 0");
 	g_bot = CreateFakeClient("NsaSpikeBot");
 	if (g_bot > 0)
