@@ -58,7 +58,11 @@ function Build-Plugin([string]$name) {
         if ($LASTEXITCODE -ne 0) { $text = & git -C $PSScriptRoot show "$($gitRefs[$name]):scripting/disablescopes.sp" }
         $text | Set-Content $src -Encoding utf8
     }
-    & $spcomp $src "-i$SourceModDir\scripting\include" "-o$(Join-Path $dir 'sm_disablescopes.smx')" | Out-Null
+    # current compiles against the incs submodule (instance_config) ahead of SourceMod's includes; older refs never used it
+    $spcArgs = @($src)
+    if ($name -eq 'current') { $spcArgs += "-i$PSScriptRoot\incs\scripting\include" }
+    $spcArgs += "-i$SourceModDir\scripting\include", "-o$(Join-Path $dir 'sm_disablescopes.smx')"
+    & $spcomp @spcArgs | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "compile failed for $name" }
     return (Join-Path $dir 'sm_disablescopes.smx')
 }

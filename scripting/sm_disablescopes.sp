@@ -1,6 +1,7 @@
 #include <sourcemod>
 #include <sdktools>
 #include <sdkhooks>
+#include <instance_config>
 
 #pragma semicolon 1
 #pragma newdecls required
@@ -10,7 +11,6 @@
 #define DESCRIPTION "sm_disablescopes of selected weapons & limit air or ground use"
 #define PLUGIN_VERSION "0.0.b11"
 #define URL "https://github.com/Ballganda/SourceMod-DisableScopes"
-#define DS_PREFIX "[DisableScopes]"
 
 public Plugin myinfo = {
     name = NAME,
@@ -73,13 +73,13 @@ public void OnPluginStart()
 
     CreateConVar("sm_disablescopes_version", PLUGIN_VERSION, NAME, FCVAR_NOTIFY|FCVAR_DONTRECORD);
 
-    g_cvEnablePlugin = CreateConVar("sm_disablescopes_enable", "1", "sm_disablescopes_enable enables the plugin <1|0>");
-    g_cvDisableScopeAwp = CreateConVar("sm_disablescopes_awp", "1", "Disable the AWP scope <1|0>");
-    g_cvDisableScopeScout = CreateConVar("sm_disablescopes_scout", "1", "Disable the scout scope <1|0>");
-    g_cvDisableScopeAutoSnipers = CreateConVar("sm_disablescopes_autosnipers", "1", "Disable the auto snipers scope <1|0>");
-    g_cvDisableScopeWeakSnipers = CreateConVar("sm_disablescopes_weaksnipers", "1", "Disable the weak snipers scope <1|0>");
-    g_cvDisableInAir = CreateConVar("sm_disablescopes_inair", "1", "Disable Scope when the player is jumping/off ground <1|0>");
-    g_cvDisableOnGround = CreateConVar("sm_disablescopes_onground", "0", "Disable Scope when the player is on ground <1|0>");
+    g_cvEnablePlugin = CreateConVar("sm_disablescopes_enable", "1", "sm_disablescopes_enable enables the plugin <1|0>", 0, true, 0.0, true, 1.0);
+    g_cvDisableScopeAwp = CreateConVar("sm_disablescopes_awp", "1", "Disable the AWP scope <1|0>", 0, true, 0.0, true, 1.0);
+    g_cvDisableScopeScout = CreateConVar("sm_disablescopes_scout", "1", "Disable the scout scope <1|0>", 0, true, 0.0, true, 1.0);
+    g_cvDisableScopeAutoSnipers = CreateConVar("sm_disablescopes_autosnipers", "1", "Disable the auto snipers scope <1|0>", 0, true, 0.0, true, 1.0);
+    g_cvDisableScopeWeakSnipers = CreateConVar("sm_disablescopes_weaksnipers", "1", "Disable the weak snipers scope <1|0>", 0, true, 0.0, true, 1.0);
+    g_cvDisableInAir = CreateConVar("sm_disablescopes_inair", "1", "Disable Scope when the player is jumping/off ground <1|0>", 0, true, 0.0, true, 1.0);
+    g_cvDisableOnGround = CreateConVar("sm_disablescopes_onground", "0", "Disable Scope when the player is on ground <1|0>", 0, true, 0.0, true, 1.0);
 
     g_cvEnablePlugin.AddChangeHook(OnRuleCvarChanged);
     g_cvDisableScopeAwp.AddChangeHook(OnRuleCvarChanged);
@@ -104,28 +104,24 @@ public void OnPluginStart()
         }
     }
 
-    static const char g_DefaultDisableScopesCfg[][] =
-    {
-        "// sm_disablescopes per-instance config",
-        "sm_disablescopes_enable 1",
-        "sm_disablescopes_awp 1",
-        "sm_disablescopes_scout 1",
-        "sm_disablescopes_autosnipers 1",
-        "sm_disablescopes_weaksnipers 1",
-        "sm_disablescopes_inair 1",
-        "sm_disablescopes_onground 0"
-    };
-
-    GeneratePerInstanceConfig(
-        "sm_disablescopes",
-        g_DefaultDisableScopesCfg,
-        sizeof(g_DefaultDisableScopesCfg)
-    );
+    // configs/sm_disablescopes.cfg (named after the plugin file); the version cvar stays out of it
+    InstCfg_Add(g_cvEnablePlugin);
+    InstCfg_Add(g_cvDisableScopeAwp);
+    InstCfg_Add(g_cvDisableScopeScout);
+    InstCfg_Add(g_cvDisableScopeAutoSnipers);
+    InstCfg_Add(g_cvDisableScopeWeakSnipers);
+    InstCfg_Add(g_cvDisableInAir);
+    InstCfg_Add(g_cvDisableOnGround);
+    InstCfg_Ensure();
 }
 
 public void OnConfigsExecuted()
 {
-    LoadInstanceConfig("sm_disablescopes");
+    InstCfg_Apply();
+
+    // The change hooks already refreshed on each change; this covers a late load and unchanged values.
+    ReloadRules();
+    RefreshAllClients();
 }
 
 public void OnClientPutInServer(int client)
@@ -263,94 +259,6 @@ bool HoldSecondaryAttack(int client, int activeWeapon)
     }
     g_fWrittenNSA[client] = nsa;
     return steady;
-}
-
-void GeneratePerInstanceConfig(const char[] cfgName, const char[][] defaultLines, int lineCount)
-{
-    char cfgDir[PLATFORM_MAX_PATH];
-    char cfgPath[PLATFORM_MAX_PATH];
-
-    // addons/sourcemod/configs
-    BuildPath(Path_SM, cfgDir, sizeof(cfgDir), "configs");
-
-    // addons/sourcemod/configs/<cfgName>.cfg
-    Format(cfgPath, sizeof(cfgPath), "%s/%s.cfg", cfgDir, cfgName);
-
-    PrintToServer("%sCFG FILE: %s", DS_PREFIX, cfgPath);
-
-    // Only create if missing
-    if (!FileExists(cfgPath))
-    {
-        File f = OpenFile(cfgPath, "w");
-        if (f == null)
-        {
-            PrintToServer("%sFAILED to create config file", DS_PREFIX);
-            return;
-        }
-
-        for (int i = 0; i < lineCount; i++)
-        {
-            f.WriteLine(defaultLines[i]);
-        }
-
-        delete f;
-        PrintToServer("%sConfig file created", DS_PREFIX);
-    }
-    else
-    {
-        PrintToServer("%sConfig file already exists, not overwriting", DS_PREFIX);
-    }
-}
-
-void LoadInstanceConfig(const char[] cfgName)
-{
-    char cfgPath[PLATFORM_MAX_PATH];
-    BuildPath(Path_SM, cfgPath, sizeof(cfgPath), "configs");
-    Format(cfgPath, sizeof(cfgPath), "%s/%s.cfg", cfgPath, cfgName);
-
-    File f = OpenFile(cfgPath, "r");
-    if (f == null)
-    {
-        PrintToServer("%sFailed to open instance config", DS_PREFIX);
-        return;
-    }
-
-    char line[256];
-    char cvar[64];
-    char value[64];
-
-    while (!f.EndOfFile() && f.ReadLine(line, sizeof(line)))
-    {
-        TrimString(line);
-
-        // Skip empty lines and comments
-        if (line[0] == '\0' || line[0] == '/' || line[0] == ';')
-            continue;
-
-        int pos = BreakString(line, cvar, sizeof(cvar));
-        if (pos == -1)
-            continue;
-
-        strcopy(value, sizeof(value), line[pos]);
-        TrimString(value);
-
-        ConVar cv = FindConVar(cvar);
-        if (cv == null)
-        {
-            PrintToServer("%sUnknown cvar in config: %s", DS_PREFIX, cvar);
-            continue;
-        }
-
-        cv.SetString(value);
-    }
-
-    delete f;
-
-    // The change hooks already refreshed on each change; this is a safety net.
-    ReloadRules();
-    RefreshAllClients();
-
-    PrintToServer("%sInstance config loaded", DS_PREFIX);
 }
 
 bool IsNoScopeWeapon(int entityNumber)

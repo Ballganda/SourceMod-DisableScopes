@@ -48,8 +48,56 @@ enum
 	OP_PICKUP,
 	OP_RESPAWN,
 	OP_WAIT,        // arg = steps
-	OP_CHECK        // arg = kind, arg2 = name index
+	OP_CHECK,       // arg = kind, arg2 = name index
+	OP_MASK,        // arg = bitmask the scope rule expects; cvars left alone (they come from the config file)
+	OP_CFG          // arg = config case, arg2 = step (0 sets up and reloads the plugin, 1 checks and restores)
 };
+
+// Config file cases (issue #19): each backs up configs/sm_disablescopes.cfg, writes its own, reloads the
+// plugin, checks the cvars and the file, then restores the server's file.
+enum
+{
+	CC_CREATED = 0, // no file: one is generated with a commented entry per settings cvar
+	CC_LEGACY,      // the file the plugin wrote before the include: applied, left byte-for-byte as it is
+	CC_APPEND,      // some cvars missing: appended with defaults, existing text kept
+	CC_PARSE,       // quotes, trailing ';' and '//', CRLF, blank and comment lines
+	CC_FOREIGN,     // a server cvar and a misspelled name: neither applied, each logged once
+	CC_CLAMP,       // out-of-range values clamped to 0..1
+	NUM_CFG_CASES
+};
+
+static const char g_cfgCaseNames[NUM_CFG_CASES][] =
+{
+	"config: no file, one is created with a commented entry per settings cvar, none in the game cfg folder",
+	"config: file in the old plugin's format applied and left byte-for-byte unchanged",
+	"config: missing cvars appended with defaults, existing lines unchanged",
+	"config: quotes, trailing ; and //, CRLF, blank and comment lines apply the intended values",
+	"config: foreign and misspelled cvars not applied, each logged once",
+	"config: out-of-range values clamped to 0..1"
+};
+
+// What each case's file sets (bitmask, as g_cvars); before loading, the cvars are set to the opposite.
+static const int g_cfgExpect[NUM_CFG_CASES] =
+{
+	M_DEFAULT,
+	B_ENABLE | B_WEAK | B_GROUND,
+	M_DEFAULT & ~(B_AWP | B_INAIR),
+	B_ENABLE | B_WEAK | B_GROUND,
+	M_DEFAULT & ~B_AWP,
+	B_ENABLE | B_SCOUT | B_WEAK | B_GROUND
+};
+
+// Defaults and description starts, written from the plugin source, not read from it.
+static const char g_cvarDefaults[][] = { "1", "1", "1", "1", "1", "1", "0" };
+static const char g_cvarDescs[][] =
+{
+	"sm_disablescopes_enable enables the plugin", "Disable the AWP scope", "Disable the scout scope",
+	"Disable the auto snipers scope", "Disable the weak snipers scope", "Disable Scope when the player is jumping",
+	"Disable Scope when the player is on ground"
+};
+
+#define CFG_FOREIGN "mp_freezetime"
+#define CFG_TYPO "sm_disablescopes_awpp"
 
 enum
 {
@@ -126,6 +174,14 @@ int g_blockedCmds = 0;       // commands seen in a blocked state since the last 
 int g_nsaChanges = 0;        // of those, how many saw a different next-secondary-attack time
 float g_lastNsa = -1.0;
 
+// config cases
+char g_cfgPath[PLATFORM_MAX_PATH];   // configs/sm_disablescopes.cfg
+char g_cfgBak[PLATFORM_MAX_PATH];    // the server's own file while a case runs
+char g_cfgA[16384];                  // file contents under inspection
+char g_cfgOld[2048];                 // what the case wrote
+int g_logForeign = 0;                // log lines naming each skipped name, before the reload
+int g_logTypo = 0;
+
 public Plugin myinfo =
 {
 	name = "disablescopes_tests",
@@ -141,6 +197,8 @@ public void OnPluginStart()
 	g_cvInjectError = CreateConVar("disablescopes_test_inject_error", "0", "Log a deliberate error (checks that error detection works).", FCVAR_NONE, true, 0.0, true, 1.0);
 	RegServerCmd("disablescopes_test", Cmd_Run, "Run the DisableScopes suite");
 	BuildPath(Path_SM, g_logPath, sizeof(g_logPath), "logs/disablescopes_tests.log");
+	BuildPath(Path_SM, g_cfgPath, sizeof(g_cfgPath), "configs/sm_disablescopes.cfg");
+	BuildPath(Path_SM, g_cfgBak, sizeof(g_cfgBak), "configs/sm_disablescopes.cfg.testbak");
 	HookEvent("weapon_fire", Event_WeaponFire);
 }
 
@@ -480,6 +538,33 @@ void BuildQueue()
 		}
 	}
 	Op(OP_SCOPE, 0);
+
+	// 7. the config file, read through instance_config.inc. Runs last: each case reloads the plugin.
+	for (int c = 0; c < NUM_CFG_CASES; c++)
+	{
+		if (c == CC_PARSE)
+		{
+			// the file turns the on-ground rule on: a client already holding the weapon is reclassified
+			Op(OP_CVARS, M_DEFAULT);
+			Op(OP_WEAPON, 4);
+			Op(OP_STATE, S_GROUND);
+			Op(OP_SCOPE, 1);
+			Check(K_SCOPE, "config: before reload: %s, %s", g_weapons[4], g_stateNames[S_GROUND]);
+			Op(OP_SCOPE, 0);
+		}
+		Op(OP_CFG, c, 0);
+		Op(OP_WAIT, 4);
+		Op(OP_CFG, c, 1);
+		g_total++;
+		if (c == CC_PARSE)
+		{
+			Op(OP_MASK, g_cfgExpect[c]);
+			Op(OP_STATE, S_GROUND);
+			Op(OP_SCOPE, 1);
+			Check(K_SCOPE, "config: after reload, held weapon classified by the file: %s, %s", g_weapons[4], g_stateNames[S_GROUND]);
+			Op(OP_SCOPE, 0);
+		}
+	}
 }
 
 // ---- executor ----------------------------------------------------------------------------
@@ -625,11 +710,20 @@ bool Execute(int op, int arg, int arg2)
 		}
 		case OP_CVARS:
 		{
+			SetCvars(arg);
+		}
+		case OP_MASK:
+		{
 			g_mask = arg;
-			for (int i = 0; i < sizeof(g_cvars); i++)
+		}
+		case OP_CFG:
+		{
+			if (arg2 == 0)
 			{
-				FindConVar(g_cvars[i]).SetBool((arg & (1 << i)) != 0);
+				CfgSetup(arg);
+				return true;
 			}
+			CfgCheck(arg);
 		}
 		case OP_WEAPON:
 		{
@@ -884,4 +978,310 @@ void DoCheck(int kind, int nameIdx)
 		}
 	}
 	Report(ok, name, ok ? "" : detail);
+}
+
+void SetCvars(int mask)
+{
+	g_mask = mask;
+	for (int i = 0; i < sizeof(g_cvars); i++)
+	{
+		FindConVar(g_cvars[i]).SetBool((mask & (1 << i)) != 0);
+	}
+}
+
+// ---- config cases ----------------------------------------------------------------------------
+
+void CfgSetup(int c)
+{
+	CfgBackup();
+	SetCvars(M_ALL ^ g_cfgExpect[c]);   // every cvar starts opposite to what the file should leave
+	g_cfgOld[0] = '\0';
+	switch (c)
+	{
+		case CC_CREATED:
+		{
+			DeleteFile(g_cfgPath);
+		}
+		case CC_LEGACY:
+		{
+			// as the plugin's own config code wrote it, with non-default values
+			strcopy(g_cfgOld, sizeof(g_cfgOld), "// sm_disablescopes per-instance config\nsm_disablescopes_enable 1\nsm_disablescopes_awp 0\nsm_disablescopes_scout 0\nsm_disablescopes_autosnipers 0\nsm_disablescopes_weaksnipers 1\nsm_disablescopes_inair 0\nsm_disablescopes_onground 1\n");
+		}
+		case CC_APPEND:
+		{
+			strcopy(g_cfgOld, sizeof(g_cfgOld), "// my notes\nsm_disablescopes_awp 0\nsm_disablescopes_inair \"0\"   \n// last line, no newline after it");
+		}
+		case CC_PARSE:
+		{
+			// the commented-out lines come after the real ones, so applying them would show
+			strcopy(g_cfgOld, sizeof(g_cfgOld), "// custom settings\r\n; a semicolon comment\r\n\r\n   \r\nsm_disablescopes_enable \"1\"\r\n\tsm_disablescopes_awp   0;\r\nsm_disablescopes_scout 0 // trailing note\r\nsm_disablescopes_autosnipers \"0\";\r\n//sm_disablescopes_autosnipers 1\r\n;sm_disablescopes_autosnipers 1\r\nsm_disablescopes_weaksnipers 1\r\nsm_disablescopes_inair \"0\" // quoted, then a comment\r\nsm_disablescopes_onground 1;\r\n");
+		}
+		case CC_FOREIGN:
+		{
+			strcopy(g_cfgOld, sizeof(g_cfgOld), CFG_FOREIGN ... " 7\n" ... CFG_TYPO ... " 0\nsm_disablescopes_awp 0\n");
+			g_logForeign = CountInSmLog("\"" ... CFG_FOREIGN ... "\" is not a setting");
+			g_logTypo = CountInSmLog("\"" ... CFG_TYPO ... "\" is not a setting");
+		}
+		case CC_CLAMP:
+		{
+			strcopy(g_cfgOld, sizeof(g_cfgOld), "sm_disablescopes_enable 5\nsm_disablescopes_awp -3\nsm_disablescopes_scout 2\nsm_disablescopes_autosnipers -1\nsm_disablescopes_weaksnipers 9\nsm_disablescopes_inair -7\nsm_disablescopes_onground 3\n");
+		}
+	}
+	if (g_cfgOld[0] != '\0')
+	{
+		CfgWrite(g_cfgPath, g_cfgOld);
+	}
+	// unload then load, as OP_SETUP and OP_LOAD do, so the plugin stays after this suite
+	ServerCommand("sm plugins unload sm_disablescopes");
+	ServerCommand("sm plugins load sm_disablescopes");
+}
+
+void CfgCheck(int c)
+{
+	char why[256];
+	bool ok = CfgVerify(c, why, sizeof(why));
+	CfgRestore();
+	Report(ok, g_cfgCaseNames[c], ok ? "" : why);
+}
+
+bool CfgVerify(int c, char[] why, int len)
+{
+	if (!CvarsMatch(g_cfgExpect[c], why, len))
+	{
+		return false;
+	}
+	if (!CfgRead(g_cfgPath, g_cfgA, sizeof(g_cfgA)))
+	{
+		strcopy(why, len, "config file missing after load");
+		return false;
+	}
+	switch (c)
+	{
+		case CC_CREATED:
+		{
+			static const char stray[][] = { "cfg/sourcemod/plugin.sm_disablescopes.cfg", "cfg/sourcemod/sm_disablescopes.cfg", "cfg/sm_disablescopes.cfg", "cfg/plugin.sm_disablescopes.cfg" };
+			for (int i = 0; i < sizeof(stray); i++)
+			{
+				if (FileExists(stray[i]))
+				{
+					Format(why, len, "a config was written to the game folder: %s", stray[i]);
+					return false;
+				}
+			}
+			if (StrContains(g_cfgA, "sm_disablescopes_version") != -1)
+			{
+				strcopy(why, len, "the version cvar is in the config");
+				return false;
+			}
+			int entries = CountIn(g_cfgA, "\nsm_disablescopes_");
+			if (entries != sizeof(g_cvars))
+			{
+				Format(why, len, "%d entry lines, expected %d", entries, sizeof(g_cvars));
+				return false;
+			}
+			char needle[96];
+			char block[1024];
+			for (int i = 0; i < sizeof(g_cvars); i++)
+			{
+				Format(needle, sizeof(needle), "\n%s \"%s\"\n", g_cvars[i], g_cvarDefaults[i]);
+				int at = StrContains(g_cfgA, needle);
+				if (at == -1)
+				{
+					Format(why, len, "no entry %s \"%s\"", g_cvars[i], g_cvarDefaults[i]);
+					return false;
+				}
+				CfgBlockBefore(at, block, sizeof(block));
+				Format(needle, sizeof(needle), "// %s", g_cvarDescs[i]);
+				bool hasDesc = StrContains(block, needle) == 0;
+				Format(needle, sizeof(needle), "// Default: %s\n", g_cvarDefaults[i]);
+				if (!hasDesc || StrContains(block, needle) == -1 || StrContains(block, "// Min: 0\n") == -1 || StrContains(block, "// Max: 1\n") == -1)
+				{
+					Format(why, len, "%s: comments lack description, default or 0..1 bounds: %s", g_cvars[i], block);
+					return false;
+				}
+			}
+		}
+		case CC_LEGACY, CC_PARSE:
+		{
+			if (!StrEqual(g_cfgA, g_cfgOld))
+			{
+				strcopy(why, len, "a complete file was changed on load");
+				return false;
+			}
+		}
+		case CC_APPEND:
+		{
+			if (StrContains(g_cfgA, g_cfgOld) != 0)
+			{
+				strcopy(why, len, "existing content was changed or reordered");
+				return false;
+			}
+			char needle[96];
+			int tail = strlen(g_cfgOld);
+			for (int i = 0; i < sizeof(g_cvars); i++)
+			{
+				bool present = (i == 1 || i == 5);   // awp and inair are in the old text
+				Format(needle, sizeof(needle), "\n%s \"", g_cvars[i]);
+				int n = CountIn(g_cfgA[tail], needle);
+				if (n != (present ? 0 : 1))
+				{
+					Format(why, len, "%s appended %d times, expected %d", g_cvars[i], n, present ? 0 : 1);
+					return false;
+				}
+				Format(needle, sizeof(needle), "\n%s \"%s\"\n", g_cvars[i], g_cvarDefaults[i]);
+				if (!present && StrContains(g_cfgA[tail], needle) == -1)
+				{
+					Format(why, len, "%s not appended with its default %s", g_cvars[i], g_cvarDefaults[i]);
+					return false;
+				}
+			}
+		}
+		case CC_FOREIGN:
+		{
+			if (FindConVar(CFG_FOREIGN).IntValue == 7)
+			{
+				strcopy(why, len, CFG_FOREIGN ... " was set from the plugin's config");
+				return false;
+			}
+			if (FindConVar(CFG_TYPO) != null)
+			{
+				strcopy(why, len, CFG_TYPO ... " exists");
+				return false;
+			}
+			int nf = CountInSmLog("\"" ... CFG_FOREIGN ... "\" is not a setting") - g_logForeign;
+			int nt = CountInSmLog("\"" ... CFG_TYPO ... "\" is not a setting") - g_logTypo;
+			if (nf != 1 || nt != 1)
+			{
+				Format(why, len, "skipped names logged %s x%d, %s x%d, expected once each", CFG_FOREIGN, nf, CFG_TYPO, nt);
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+// Each cvar's value is exactly 0 or 1 as the mask says (so a value left at 5 or -3 fails).
+bool CvarsMatch(int mask, char[] why, int len)
+{
+	bool ok = true;
+	why[0] = '\0';
+	for (int i = 0; i < sizeof(g_cvars); i++)
+	{
+		float want = (mask & (1 << i)) ? 1.0 : 0.0;
+		float got = FindConVar(g_cvars[i]).FloatValue;
+		if (got != want)
+		{
+			ok = false;
+			Format(why, len, "%s%s%s=%.2f (expected %.0f)", why, why[0] ? ", " : "", g_cvars[i], got, want);
+		}
+	}
+	return ok;
+}
+
+// The server's own file is set aside for the case; a backup left by an aborted run is the original.
+void CfgBackup()
+{
+	if (!FileExists(g_cfgBak) && FileExists(g_cfgPath) && CfgRead(g_cfgPath, g_cfgA, sizeof(g_cfgA)))
+	{
+		CfgWrite(g_cfgBak, g_cfgA);
+	}
+}
+
+void CfgRestore()
+{
+	if (!FileExists(g_cfgBak))
+	{
+		DeleteFile(g_cfgPath);   // the server had none
+		return;
+	}
+	if (CfgRead(g_cfgBak, g_cfgA, sizeof(g_cfgA)))
+	{
+		CfgWrite(g_cfgPath, g_cfgA);
+		DeleteFile(g_cfgBak);
+	}
+}
+
+void CfgWrite(const char[] path, const char[] text)
+{
+	File f = OpenFile(path, "wb");
+	if (f == null)
+	{
+		LogError("cannot write %s", path);
+		return;
+	}
+	f.WriteString(text, false);
+	delete f;
+}
+
+bool CfgRead(const char[] path, char[] out, int max)
+{
+	out[0] = '\0';
+	File f = OpenFile(path, "rb");
+	if (f == null)
+	{
+		return false;
+	}
+	int size = FileSize(path);
+	if (size >= max)
+	{
+		size = max - 1;
+	}
+	int n = (size > 0) ? f.ReadString(out, max, size) : 0;
+	delete f;
+	out[(n > 0) ? n : 0] = '\0';
+	return true;
+}
+
+// The comment lines directly above the entry whose leading newline is g_cfgA[at] (back to the previous blank line).
+void CfgBlockBefore(int at, char[] out, int max)
+{
+	int start = at;
+	while (start > 0 && !(g_cfgA[start - 1] == '\n' && start >= 2 && g_cfgA[start - 2] == '\n'))
+	{
+		start--;
+	}
+	int len = at - start + 2;   // includes the newline that ends the last comment line
+	if (len > max)
+	{
+		len = max;
+	}
+	strcopy(out, len, g_cfgA[start]);
+}
+
+int CountIn(const char[] text, const char[] needle)
+{
+	int n = 0;
+	int from = 0;
+	int at;
+	while ((at = StrContains(text[from], needle)) != -1)
+	{
+		n++;
+		from += at + 1;
+	}
+	return n;
+}
+
+// Lines of today's SourceMod log that contain text.
+int CountInSmLog(const char[] text)
+{
+	char date[16];
+	char path[PLATFORM_MAX_PATH];
+	char line[512];
+	FormatTime(date, sizeof(date), "%Y%m%d");
+	BuildPath(Path_SM, path, sizeof(path), "logs/L%s.log", date);
+	File f = OpenFile(path, "r");
+	if (f == null)
+	{
+		return 0;
+	}
+	int n = 0;
+	while (f.ReadLine(line, sizeof(line)))
+	{
+		if (StrContains(line, text) != -1)
+		{
+			n++;
+		}
+	}
+	delete f;
+	return n;
 }
