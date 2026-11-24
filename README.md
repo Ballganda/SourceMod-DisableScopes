@@ -79,23 +79,48 @@ The plugin keeps its settings in its own file, one per SourceMod install:
 cstrike/addons/sourcemod/configs/sm_disablescopes.cfg
 ```
 
-- It is created with the defaults the first time the plugin loads, and never overwritten after that.
+- It is created the first time the plugin loads, with every setting at its default and a comment above each one: its description, default, and allowed range.
+- When a later version adds a setting, the plugin appends it with its default to the end of your existing file. Your own lines are never changed or reordered.
 - It is read every map, after the server's own configs (`server.cfg` and the rest) have run. A value set here therefore wins over the same cvar set in `server.cfg`. Edit this file, not `server.cfg`.
-- Format: one `cvar value` per line. Lines starting with `//` or `;` are comments, and blank lines are ignored.
+- Format: one `cvar value` per line. A value may be quoted (`sm_disablescopes_awp "0"`) and may be followed by `;` or a `// comment`. Lines starting with `//` or `;` are comments, and blank lines are ignored.
+- Every value is `0` or `1`. A value outside that range is clamped to it.
+- Only the plugin's own cvars (the table above, except `sm_disablescopes_version`) are applied. A line naming any other cvar is skipped.
+- Messages go to the SourceMod logs (`addons/sourcemod/logs/L<date>.log`): when the file is created or entries are appended, when it cannot be read or written, and, once per name per plugin load, each skipped line, for example:
+
+  ```
+  Config .../configs/sm_disablescopes.cfg line 12: "mp_freezetime" is not a setting of this plugin, line skipped
+  ```
+
 - Several servers that share one set of game files but use different SourceMod folders (`+sm_basepath`) each get their own file, so their settings do not collide.
 
-Default file:
+Start of a newly created file:
 
 ```
-// sm_disablescopes per-instance config
-sm_disablescopes_enable 1
-sm_disablescopes_awp 1
-sm_disablescopes_scout 1
-sm_disablescopes_autosnipers 1
-sm_disablescopes_weaksnipers 1
-sm_disablescopes_inair 1
-sm_disablescopes_onground 0
+// Settings of sm_disablescopes.smx, in this server's own SourceMod folder.
+// Applied on every map change. Lines are: name value  ("//" and ";" start a comment).
+// Entries missing here are appended automatically when the plugin loads; existing lines are never changed.
+
+// sm_disablescopes_enable enables the plugin <1|0>
+// Default: 1
+// Min: 0
+// Max: 1
+sm_disablescopes_enable "1"
+
+// Disable the AWP scope <1|0>
+// Default: 1
+// Min: 0
+// Max: 1
+sm_disablescopes_awp "1"
 ```
+
+The other five settings follow in the same form.
+
+#### Changes from earlier versions
+
+A file written by an earlier version keeps working with its values unchanged, and none of its lines is rewritten. Two things behave differently:
+
+- A line starting with a single `/` is no longer a comment. Start comments with `//` or `;`.
+- A line naming another plugin's or the server's cvar (for example `sv_cheats 1`) is no longer applied. It is skipped and logged. Set those cvars in `server.cfg`.
 
 Example, a no-scope AWP and scout server (both rules on, rifles left alone):
 
