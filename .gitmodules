@@ -1,0 +1,3 @@
+[submodule "incs"]
+	path = incs
+	url = https://github.com/Ballganda/SourceMod-Incs.git
