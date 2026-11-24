@@ -13,6 +13,11 @@ if (-not (Test-Path $spcomp)) { Write-Error "spcomp not found at $spcomp"; exit 
 $out = Join-Path $PSScriptRoot 'plugins'
 New-Item -ItemType Directory -Force $out | Out-Null
 
+# The plugin was built as disablescopes.smx before it was renamed to sm_disablescopes.smx; a leftover copy
+# would load next to the new one, so remove it from the output folder and, when deploying, from the server.
+Remove-Item (Join-Path $out 'disablescopes.smx') -ErrorAction SilentlyContinue
+if ($Deploy) { Remove-Item (Join-Path $SourceModDir 'plugins\disablescopes.smx') -ErrorAction SilentlyContinue }
+
 $failed = 0
 $targets = @(Get-ChildItem (Join-Path $PSScriptRoot 'scripting') -Filter *.sp) + @(Get-ChildItem (Join-Path $PSScriptRoot 'tests') -Filter *.sp -ErrorAction SilentlyContinue)
 foreach ($sp in $targets) {

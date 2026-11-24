@@ -115,7 +115,7 @@ function Invoke-Run([string]$scenario, [int]$perSide, [string]$tag) {
     New-Item -ItemType Directory -Force $OutDir | Out-Null
     $report | Set-Content (Join-Path $OutDir "vprof-$tag.txt") -Encoding utf8
     if ($before) { $before | Set-Content (Join-Path $OutDir "vprof-$tag-before.txt") -Encoding utf8 }
-    # The server runs the plugin as sm_disablescopes.smx (the deployed name), not disablescopes.smx.
+    # The plugin is built and deployed as sm_disablescopes.smx.
     $after = Get-PluginCost $report 'sm_disablescopes'
     if (-not $after -or $after.Calls -eq 0) { throw 'the plugin does not appear in the vprof report' }
     $base = $null
