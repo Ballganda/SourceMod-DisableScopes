@@ -9,7 +9,7 @@
 #define NAME "[CS:S]sm_disablescopes"
 #define AUTHOR "BallGanda"
 #define DESCRIPTION "sm_disablescopes of selected weapons & limit air or ground use"
-#define PLUGIN_VERSION "0.0.b12"
+#define PLUGIN_VERSION "0.1.0"
 #define URL "https://github.com/Ballganda/SourceMod-DisableScopes"
 
 public Plugin myinfo = {
