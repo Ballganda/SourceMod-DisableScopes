@@ -303,23 +303,25 @@ void CacheEntPropAvailability(int client, int activeWeapon)
 
 void ForceUnscope(int client, int activeWeapon)
 {
+    CacheEntPropAvailability(client, activeWeapon);
+
+    // A scoped shot unzooms and sets m_bResumeZoom; the game zooms back in when the bolt cycles,
+    // without touching the next-secondary-attack time. Clear it even when the view is not scoped now.
+    if (g_bHasResumeZoom && GetEntProp(client, Prop_Send, "m_bResumeZoom") != 0)
+    {
+        SetEntProp(client, Prop_Send, "m_bResumeZoom", 0);
+    }
+
     // m_iFOV is 0 (b8 build) or the default view (b6 build) when not scoped.
     int fov = GetEntData(client, g_offFOV);
     if (fov == 0 || fov == GetEntData(client, g_offDefaultFOV))
         return;
-
-    CacheEntPropAvailability(client, activeWeapon);
 
     SetEntProp(client, Prop_Send, "m_iFOV", 0);
 
     if (g_bHasZoomLevel)
     {
         SetEntProp(activeWeapon, Prop_Send, "m_zoomLevel", 0);
-    }
-
-    if (g_bHasResumeZoom)
-    {
-        SetEntProp(client, Prop_Send, "m_bResumeZoom", 0);
     }
 }
 
