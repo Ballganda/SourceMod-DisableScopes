@@ -441,6 +441,37 @@ void BuildQueue()
 		Op(OP_SCOPE, 0);
 	}
 
+	// 3c. a scoped shot unzooms and sets the game's resume-zoom flag; enter a blocked state before the bolt
+	//     cycles, with the weapon's timers left as the shot set them: the game must not zoom back in
+	int rzMask[2];
+	int rzFrom[2];
+	int rzTo[2];
+	rzMask[0] = M_DEFAULT;
+	rzFrom[0] = S_GROUND;
+	rzTo[0] = S_WATER;
+	rzMask[1] = M_ALL & ~B_INAIR;
+	rzFrom[1] = S_WATER;
+	rzTo[1] = S_GROUND;
+	for (int w = 0; w < 2; w++)   // the AWP and the scout resume their zoom after a shot
+	{
+		for (int k = 0; k < 2; k++)
+		{
+			Op(OP_CVARS, rzMask[k]);
+			Op(OP_WEAPON, w);
+			Op(OP_STATE, rzFrom[k]);
+			Op(OP_SCOPE, 1);
+			Check(K_SCOPE, "resume zoom: %s scopes, %s", g_weapons[w], g_stateNames[rzFrom[k]]);
+			Op(OP_SCOPE, 0);
+			Op(OP_FIRE, 1);
+			Check(K_FIRE, "resume zoom: %s fires scoped, %s", g_weapons[w], g_stateNames[rzFrom[k]]);
+			Op(OP_FIRE, 0);
+			Op(OP_STATE, rzTo[k], 3);
+			Op(OP_WAIT, 8);
+			Check(K_UNSCOPED, "resume zoom: %s shot, then %s: unscoped after the bolt cycles", g_weapons[w], g_stateNames[rzTo[k]]);
+			Check(K_NOZOOMBLOCKED, "resume zoom: %s shot, then %s: no command zoomed", g_weapons[w], g_stateNames[rzTo[k]]);
+		}
+	}
+
 	// 4. switch, reload, drop and pickup, respawn leave no stale block or allowance
 	for (int st = 0; st < 2; st++)
 	{
